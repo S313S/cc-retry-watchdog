@@ -184,9 +184,15 @@ for you, a session that already recovered and kept writing, a permission prompt,
 a subagent error while the main loop runs on, and the error text merely appearing
 in conversation.
 
+A background agent that outlives the dead turn is *not* one of them. Its panel
+keeps drawing under the error long after the main loop is parked, which used to
+read as "the turn moved on" and left the fallback blind — one real drop sat
+unretried for eleven hours that way. That chrome is now recognized; anything the
+main loop itself emits after the error still disqualifies the session.
+
 ### When an injection stalls
 
-The guard above has a failure mode of its own. `do script` hands Terminal.app
+The last-moment re-check above has a failure mode of its own. `do script` hands Terminal.app
 the text and the return in a single write, and a TUI can take that for a paste:
 the text lands in the input box and nothing is submitted. The box is then
 non-empty forever — which is exactly what the watchdog refuses to type into, so
@@ -201,12 +207,6 @@ injects normally. Equality, not containment: text the user typed that merely
 starts with or contains the retry prompt is theirs, and is never touched.
 Pressing return again — the obvious alternative — does not submit a box in this
 state; that was tried against a live session before Ctrl-U was.
-
-A background agent that outlives the dead turn is *not* one of them. Its panel
-keeps drawing under the error long after the main loop is parked, which used to
-read as "the turn moved on" and left the fallback blind -- one real drop sat
-unretried for eleven hours that way. That chrome is now recognized; anything the
-main loop itself emits after the error still disqualifies the session.
 
 Two suites pin all of this. Run both after changing any pattern:
 
