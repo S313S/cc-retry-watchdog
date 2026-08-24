@@ -16,7 +16,38 @@ human types something. On long autonomous runs this is the difference between
 This watchdog is that human. It notices the drop and types your retry prompt into
 that exact terminal, and nothing else.
 
-[English] · [中文](README.zh-CN.md)
+**English** · [中文](README.zh-CN.md)
+
+![macOS](https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black)
+![tmux](https://img.shields.io/badge/tmux-any%20platform-black)
+![Python](https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+[Is this you?](#is-this-you) ·
+[Why the built-in retry does not cover this](#why-the-built-in-retry-does-not-cover-this) ·
+[What counts as a drop](#what-counts-as-a-drop) ·
+[Install](#install) ·
+[What it looks like](#what-it-looks-like) ·
+[Supported terminals](#supported-terminals) ·
+[How it decides](#how-it-decides) ·
+[Configuration](#configuration)
+
+---
+
+## Is this you?
+
+- Claude Code printed `API Error: Connection lost mid-response` and simply stopped.
+- You came back an hour later and the session had been idle for fifty minutes.
+- A long agentic run died halfway through and nothing retried it.
+- You went looking for a Claude Code **auto-resume** or **auto-continue** setting
+  and there isn't one.
+- You exported `CLAUDE_CODE_AUTO_RESUME_ON_DROP` and nothing happened — it does
+  not exist, and [here is why](#why-the-built-in-retry-does-not-cover-this).
+- Your Mac's display slept overnight and you found `Your computer went to sleep
+  mid-response` waiting for you in the morning.
+
+If none of that looks familiar, this tool has nothing for you. It does one thing
+and deliberately ignores every other kind of failure.
 
 ---
 
@@ -110,6 +141,24 @@ ccwatch hook      # is the hook registered? any pending tickets?
 
 Claude Code sessions **already running** will not load a newly added hook until
 they restart. They still get the polling fallback in the meantime.
+
+---
+
+## What it looks like
+
+Nothing at all, when it is working — which is the point. The evidence is in
+`~/.claude/cc-autoresume/watchdog.log`:
+
+```
+[01:05:10] SENT[hook] Terminal:44939:1 | /dev/ttys000 | MarketingResearch — … | retry #1
+[01:22:47] ticket held | /dev/ttys000 | stood down at the last moment: session busy (Retrying in Ns)
+[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | OK
+```
+
+Line one is a rescue, one second after the drop. Line two is the watchdog
+*refusing* to type, because that session had started recovering on its own and
+interrupting it would have cost the turn. Line three is it repairing an earlier
+injection of its own that never made it out of the input box.
 
 ---
 
@@ -283,9 +332,12 @@ Things that cost real debugging time, recorded so nobody repeats them:
 - **The hook payload's `error` field is only a coarse class** — a mid-stream drop
   and a 502 both arrive as `"server_error"`. The real message is in
   `last_assistant_message`.
-- **Send the text and the Return separately.** A TUI that receives text and
-  newline in one read may treat it as a paste and insert a line break instead of
-  submitting.
+- **Send the text and the Return separately where the terminal lets you.** A TUI
+  that receives both in one read may take it for a paste and leave the text
+  sitting in the input box, unsubmitted. iTerm2 and tmux can send them apart;
+  Terminal.app's `do script` cannot, which is why a stalled injection has to be
+  recognized and cleared after the fact instead. Pressing Return again is not
+  the fix — that was tried against a live session, and it does not submit.
 - **AppleScript keystroke simulation is not an option** unless the user has
   granted osascript Accessibility rights; `System Events` keystroke fails with
   "osascript is not allowed to send keystrokes". Everything here goes through each

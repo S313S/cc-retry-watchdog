@@ -13,7 +13,37 @@ Claude Code 的响应流被中途掐断时，会直接停死：
 
 这个守护就是那个"人"。它发现掉线后，把你的重试提示敲进**那一个**终端，别的什么都不做。
 
-[English](README.md) · [中文]
+[English](README.md) · **中文**
+
+![macOS](https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black)
+![tmux](https://img.shields.io/badge/tmux-any%20platform-black)
+![Python](https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+[这是你遇到的情况吗](#这是你遇到的情况吗) ·
+[为什么内置重试救不了它](#为什么内置重试救不了它) ·
+[什么算掉线](#什么算掉线) ·
+[安装](#安装) ·
+[它跑起来是什么样](#它跑起来是什么样) ·
+[支持的终端](#支持的终端) ·
+[它怎么判断](#它怎么判断) ·
+[配置](#配置)
+
+---
+
+## 这是你遇到的情况吗
+
+- Claude Code 打出 `API Error: Connection lost mid-response`，然后就不动了。
+- 你一小时后回来，发现会话已经空转了五十分钟。
+- 一个跑很久的 agent 任务半路死掉，没有任何东西去重试它。
+- 你去找 Claude Code 的**自动恢复 / 自动继续**（auto-resume / auto-continue）
+  开关，发现根本没有这个东西。
+- 你 export 了 `CLAUDE_CODE_AUTO_RESUME_ON_DROP`，毫无反应——它并不存在，
+  [原因在这里](#为什么内置重试救不了它)。
+- Mac 夜里熄了屏，早上起来看到的是 `Your computer went to sleep mid-response`。
+
+如果上面一条都不像你的情况，这个工具对你没用：它只干这一件事，
+其他任何类型的失败都刻意不管。
 
 ---
 
@@ -95,6 +125,23 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 ```
 
 **已经在运行的** Claude Code 会话要重启才会加载新装的钩子，在那之前它们走轮询兜底。
+
+---
+
+## 它跑起来是什么样
+
+正常工作时你什么都看不见——这正是重点。证据在
+`~/.claude/cc-autoresume/watchdog.log` 里：
+
+```
+[01:05:10] SENT[hook] Terminal:44939:1 | /dev/ttys000 | MarketingResearch — … | retry #1
+[01:22:47] ticket held | /dev/ttys000 | stood down at the last moment: session busy (Retrying in Ns)
+[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | OK
+```
+
+第一行是一次救援，掉线一秒后完成。第二行是它**主动撤手**——那个会话当时正在走
+内置重试，打进去反而会打断它自我修复。第三行是它在修自己的烂摊子：一次早先的注入
+没能从输入框里发出去，被识别出来清掉了。
 
 ---
 
@@ -240,8 +287,10 @@ python3 tests/test_messages.py   # 25 条真实 CLI 文案，该触发 / 绝不�
 - **钩子进程自己没有控制终端**（`ps` 显示 `??`），tty 要沿父进程链往上找。
 - **钩子 payload 的 `error` 只是泛化分类**——断流和 502 都叫 `"server_error"`，
   真正的报错原文在 `last_assistant_message`。
-- **文本和回车要分两次发。** TUI 如果在一次读取里同时拿到文本和换行，
-  可能当成粘贴而插入一个换行，而不是提交。
+- **终端允许的话，文本和回车要分两次发。** TUI 如果在一次读取里同时拿到两者，
+  可能当成粘贴，文字就留在输入框里没提交。iTerm2 和 tmux 能分开发；
+  Terminal.app 的 `do script` 做不到，所以只能事后识别并清掉卡住的注入。
+  「再补一个回车」不是解法——拿真实会话试过，提交不了。
 - **不能用 AppleScript 模拟按键**，除非用户给了 osascript 辅助功能权限，
   否则 `System Events` 会报"osascript 不允许发送按键"。所以全部走各终端自己的脚本接口。
 
