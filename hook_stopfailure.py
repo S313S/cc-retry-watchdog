@@ -32,9 +32,15 @@ TRIG_DIR = os.path.join(BASE, "triggers")
 
 # Only open a ticket for a dropped stream. Retrying a rate-limit or an auth
 # failure would just burn another turn.
+# Kept in step with DROP_CAUSES in watchdog.py -- same allowlist, expressed as
+# lowercase substrings. Both the <=2.1.225 and the >=2.1.227 wordings are here.
 PATTERNS = (
-    "connection closed mid-response",
+    "mid-response. the response above may be incomplete",
     "response stalled mid-stream",
+    "the response stopped arriving",
+    "before producing a response. try again",
+    "before a response was produced. try again",
+    "connection to the api was lost (",
 )
 
 

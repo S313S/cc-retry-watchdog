@@ -3,8 +3,10 @@
 Claude Code 的响应流被中途掐断时，会直接停死：
 
 ```
-● API Error: Connection closed mid-response. The response above may be incomplete.
+● API Error: Connection lost mid-response. The response above may be incomplete.
 ```
+
+同一件事有十一种措辞，见[什么算掉线](#什么算掉线)。
 
 没有倒计时，没有重试——这一轮被定稿，会话就停在那儿等人敲字。长时间无人值守的任务，
 这就是"回来看到活干完了"和"回来发现 40 分钟前就死了"的区别。
@@ -43,6 +45,36 @@ Claude Code 的响应流被中途掐断时，会直接停死：
 关于成因的一个本地数据点：160 次掉线的耗时中位数 22 秒、最大 203 秒，
 **没有在 180s / 300s 这两个 watchdog 阈值上聚集**——说明是网络路径掐的，不是 watchdog 主动中止。
 调那些超时没有意义。
+
+---
+
+## 什么算掉线
+
+触发条件是一份**精确措辞白名单**，来自 `claude` 二进制里编译进去的字符串，
+而不是"某次在谁的屏幕上见过什么"。Claude Code 在 **2.1.226** 改写了这组文案：
+`closed` 改成了 `lost`，两条笼统的消息按成因拆成了四条。两代措辞都收录，
+所以升级或回滚都不影响：
+
+| ≤ 2.1.225 | ≥ 2.1.227 |
+|---|---|
+| `Response stalled mid-stream` | `The response stopped arriving` |
+| `Connection closed mid-response` | `Connection lost mid-response` |
+| `Server error mid-response` | `Server error mid-response` |
+| — | `Your computer went to sleep mid-response` |
+
+这几条对应"已经吐出过内容"的那一轮，所以结尾是 *"The response above may be
+incomplete."*。同样的故障发生在"还没产出任何内容"时，结尾是 *"Try again."*，
+也一并收录——旧版是 `Response stalled while thinking` / `Connection closed
+while thinking`，新版是 `The response stalled` / `Connection lost` /
+`Your computer went to sleep before a response was produced`——外加
+`Connection to the API was lost (<code>)`，那条是在流外面抛出来的。
+
+**故意不匹配**的（重试只会白烧一轮）：`Request was aborted`（你自己按了 esc）、
+`401 Invalid API key`、tool-use 并发和重复 `tool_use` ID 这两个 `400`、
+`The model has reached its context window limit`，以及兜底的
+`Please wait a moment and try again`。判定从不只看 `API Error:` 这个前缀。
+
+升级后想重新导出这份清单，见 `tests/test_messages.py` 的文件头。
 
 ---
 
@@ -115,17 +147,43 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
   `Retrying in Ns · attempt n/m`，绝不打断它自我修复；
 - 输入框是空的，你打了一半的字不会被冲掉；
 - 那里确实有 claude 进程在跑；
-- 过了冷却期（30 秒）且该会话连续重试没超上限（6 次）。
+- 过了冷却期（30 秒）且该会话连续重试没超上限（6 次）；
+- 以及——在真正下键的那一瞬间，上面这些依然成立。敲字之前会**单独重读那一个 tab**，
+  因为会话可能就在这个空档里醒过来（后台 agent 回来的一条 task notification 就够了）。
+  往刚醒的会话里打字，文字会**没提交**地卡在输入框里，而非空输入框正是本工具拒绝
+  触碰的状态——一次没掐准的注入，就能让这个会话此后再也得不到救援。
 
 明确忽略的情况：任务正常做完在等你输入、已经恢复并继续输出、正在等权限确认、
 子 agent 报错但主循环还在跑、以及只是对话正文里提到了这段报错文字。
 
-`tests/test_analyze.py` 把这些全钉死了——20 个手工复刻的终端版面，一半是"绝不能触发"。
-改任何一条规则后都跑一遍：
+### 当一次注入卡住的时候
+
+上面那条防线自己也有失效模式。`do script` 会把文字和回车一次性写给 Terminal，
+而 TUI 可能把这当成一次粘贴：文字进了输入框，但什么都没提交。输入框从此永远非空——
+而非空输入框正是本工具拒绝触碰的状态，于是**一次没掐准的注入，就让这个会话此后
+再也得不到救援**。这不是假想：它让一个真实会话在掉线状态下躺了 9 小时 27 分，
+而日志每一秒都在如实地写「input box not empty」。
+
+所以：如果输入框里**正好等于**重试语，而这个会话本来就该被救，那就认定它是我们自己
+卡住的注入，用 Ctrl-U 清掉；待处理的 ticket 故意保留，下一轮扫描正常注入。判定用
+相等而不是包含——用户自己打的、只是以重试语开头或包含重试语的文字，永远不动。
+至于「再补一个回车」这个显而易见的替代方案：实测在这个状态下提交不了，是先拿真实
+会话验过 Ctrl-U 才落地的。
+
+但**后台 agent 比死掉的那一轮活得更久**不算「已经恢复」。主循环早就停住了，它的
+面板还在报错下面继续画，这曾被误判成「这一轮往下走了」，导致轮询兜底整夜失明——
+真实发生过一次掉线 11 小时无人重试。现在这类装饰会被识别；主循环自己写出来的东西
+出现在报错之后，依然会让这个会话出局。
+
+两套测试把这些全钉死了。改任何一条规则后都跑一遍：
 
 ```bash
-python3 tests/test_analyze.py
+python3 tests/test_analyze.py    # 45 个手工复刻的终端版面
+python3 tests/test_messages.py   # 25 条真实 CLI 文案，该触发 / 绝不能触发
 ```
+
+两套里都有一半以上是"绝不能触发"——出 bug 的代价在这一边：
+误判会往你正在用的会话里敲字。
 
 ---
 
@@ -168,6 +226,10 @@ python3 tests/test_analyze.py
 
 ## 实现笔记（踩过的坑）
 
+- **ticket 绝不能一声不吭地过期。** 被拦下的 ticket 现在每次原因变化都会记一行
+  （`ticket held | <tty> | <原因>`），过期那行也会带上最后一次判定。在此之前，
+  漏掉一次掉线在日志里只留下 `expired`，根本分不清当时是判成忙、没认出版面、
+  还是压根没枚举到那个会话。
 - **Terminal.app 的脚本字典有两个静默失败点。** `repeat with w in windows` 取不到东西，
   必须用 `window wi` 下标；`set tb to tab ti of window wi` 之后取 `contents of tb`
   返回空，必须每次写完整限定符。AppleScript 的 `try` 会把这两个都吞掉，

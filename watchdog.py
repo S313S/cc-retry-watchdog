@@ -6,8 +6,9 @@ killed by a mid-stream connection drop, type the retry prompt into it for you.
 
 Claude Code retries failures that happen *before* a response starts streaming.
 It does not retry a stream that dies halfway: the partial reply is finalized,
-`API Error: Connection closed mid-response.` is printed, and the session just
-sits there until a human types something. This watchdog is that human.
+`API Error: Connection lost mid-response.` is printed (one of several wordings
+-- see DROP_CAUSES below), and the session just sits there until a human types
+something. This watchdog is that human.
 
 Two independent ways of noticing a dead turn:
 
@@ -78,8 +79,39 @@ DEFAULTS = {
 
 # ---------------------------------------------------------------- patterns
 
-# The error body, tolerant of the line wrap that splits it on narrow terminals.
-ERR_TEXT = re.compile(r"API\s+Error:\s*Connection\s+closed\s+mid-?response", re.I)
+# Every wording below is a literal lifted from the Claude Code bundle, not a
+# guess. The message set was rewritten in 2.1.226: "closed" became "lost", and
+# the two generic messages split into one per cause. Both generations are
+# matched so the watchdog survives an upgrade -- or a rollback.
+#
+#   <= 2.1.225                       >= 2.1.227
+#   Response stalled mid-stream      The response stopped arriving
+#   Connection closed mid-response   Connection lost mid-response
+#   Server error mid-response        Server error mid-response
+#   (none)                           Your computer went to sleep mid-response
+#
+# They all mean one thing: a transport failure finalized the turn and no retry
+# is coming. Every *other* "API Error:" -- 401, the 400s, aborted, context
+# window, the bare "Please wait a moment" -- is a real failure that a retry
+# would only burn a turn on, so this is an explicit allowlist of causes and
+# never a match on the "API Error:" prefix alone.
+DROP_CAUSES = (
+    # Content had already streamed: "... The response above may be incomplete."
+    r"Connection\s+(?:lost|closed)\s+mid-?response",
+    r"Server\s+error\s+mid-?response",
+    r"Your\s+computer\s+went\s+to\s+sleep\s+mid-?response",
+    r"(?:The\s+)?Response\s+stalled\s+mid-?stream",
+    r"The\s+response\s+stopped\s+arriving",
+    # Nothing had been produced yet: "... Try again."
+    r"(?:The\s+)?Response\s+stalled\s+(?:while\s+thinking|before\s+a\s+response)",
+    r"Connection\s+(?:lost|closed)\s+(?:while\s+thinking|before\s+a\s+response)",
+    r"Your\s+computer\s+went\s+to\s+sleep\s+before\s+a\s+response",
+    # Transport error raised around the stream rather than inside it
+    # ("Connection to the API was lost (ECONNRESET). ... try again.")
+    r"Connection\s+to\s+the\s+API\s+was\s+lost\s*\(",
+)
+# Tolerant of the line wrap that splits the message on narrow terminals.
+ERR_TEXT = re.compile(r"API\s+Error:\s*(?:%s)" % "|".join(DROP_CAUSES), re.I)
 # Start of the error line: an optional bullet glyph (do not hardcode which) + text.
 ERR_HEAD = re.compile(r"^\s*(?:[^\w\s]{1,2}\s+)?API\s+Error:", re.U)
 
@@ -106,6 +138,13 @@ CHROME_AFTER_ERR = [
     re.compile(r"^\s*Jump to bottom", re.I),
     re.compile(r"(?:ctrl\+v to paste|/clear to save|to edit in Vim|Auto-update failed|Run claude doctor)\s*$", re.I),
     re.compile(r"^\s*❯\s*$"),
+    # A background agent outlives the turn the drop killed and keeps drawing
+    # below the error. The main loop is parked -- that is decoration, not a
+    # turn that moved on. Anything the main loop itself emits still
+    # disqualifies it, so this stays safe.
+    re.compile(r"^\s*\S{0,2}\s*Waiting for \d+ background agents? to finish\s*$", re.I),
+    re.compile(r"Backgrounded agent \(", re.I),
+    re.compile(r'^\s*\S{0,2}\s*Agent\s+".*"\s+finished\b', re.I),
 ]
 
 # If any of these follow the error, the turn actually finished normally.
@@ -370,6 +409,24 @@ def has_claude(sess, live_ttys):
 
 # ---------------------------------------------------------------- hook tickets
 
+# Why the last sweep declined to act, keyed by tty, so an expiring ticket can
+# say what it was waiting on. A ticket that dies without a word is
+# undiagnosable afterwards -- which is how one drop sat unrecovered for
+# eleven hours with nothing in the log but "expired".
+_LAST_VERDICT = {}
+_TICKET_NOTES = {}
+
+
+def ticket_note(path, tty, note):
+    """Log why a pending ticket is being held. Once per distinct reason."""
+    if _TICKET_NOTES.get(path) == note:
+        return
+    _TICKET_NOTES[path] = note
+    log("ticket held | %s | %s" % (tty, note))
+    for stale in [k for k in _TICKET_NOTES if not os.path.exists(k)]:
+        del _TICKET_NOTES[stale]
+
+
 def read_triggers(ttl_sec):
     """Collect tickets left by the StopFailure hook, keyed by tty.
 
@@ -391,7 +448,8 @@ def read_triggers(ttl_sec):
             _drop(path)
             continue
         if stamp - float(rec.get("ts") or 0) > ttl_sec:
-            log("ticket expired, discarded | %s | %s" % (rec.get("tty"), name))
+            log("ticket expired, discarded | %s | %s | last verdict: %s"
+                % (rec.get("tty"), name, _LAST_VERDICT.get(rec.get("tty"), "never evaluated")))
             _drop(path)
             continue
         rec["_path"] = path
@@ -454,7 +512,9 @@ def analyze(screen, tail_lines, require_error=True):
 
     # 3) user has typed something -- hands off
     if prompt_body.strip() and not PLACEHOLDER.match(prompt_body):
-        return False, "input box not empty, skipping", ""
+        # Worth naming: an injection whose text stalls in the box shields the
+        # session from every later rescue, and "not empty" alone hides that.
+        return False, "input box not empty (%s), skipping" % _norm(prompt_body)[:32], ""
 
     # content area = everything above the input box (minus its rule line)
     end = prompt_idx
@@ -501,7 +561,8 @@ def analyze(screen, tail_lines, require_error=True):
         return False, "output after the error (%s) -- turn moved on" % _norm(line)[:40], ""
 
     fp = hashlib.md5("\n".join(content[max(0, err_i - 2):]).encode("utf-8")).hexdigest()[:12]
-    return True, "parked on Connection closed mid-response", fp
+    hit = ERR_TEXT.search(_norm(" ".join(content[err_i:err_i + 3])))
+    return True, "parked on %s" % hit.group(0), fp
 
 
 # ---------------------------------------------------------------- injecting
@@ -548,6 +609,121 @@ end tell
 '''
 
 
+# One tab, read on its own. Used for the last-moment re-check below, never to
+# enumerate -- collect_sessions reads every tab in a single round-trip.
+TERMINAL_TAB_READ = '''
+tell application "Terminal"
+  repeat with wi from 1 to (count of windows)
+    try
+      if ((id of window wi) as string) is "%(wid)s" then
+        return (contents of tab %(ti)s of window wi)
+      end if
+    end try
+  end repeat
+  return ""
+end tell
+'''
+
+
+# Ctrl-U clears the line in Claude Code's input box. Verified against a live
+# session rather than assumed -- the obvious alternative, pressing return again,
+# does not submit a box in this state.
+TERMINAL_CLEAR = '''
+tell application "Terminal"
+  repeat with wi from 1 to (count of windows)
+    try
+      if ((id of window wi) as string) is "%(wid)s" then
+        do script (character id 21) in tab %(ti)s of window wi
+        return "OK"
+      end if
+    end try
+  end repeat
+  return "NOTFOUND"
+end tell
+'''
+
+ITERM_CLEAR = '''
+tell application "iTerm2"
+  repeat with wi from 1 to (count of windows)
+    try
+      repeat with ti from 1 to (count of tabs of window wi)
+        try
+          repeat with si from 1 to (count of sessions of tab ti of window wi)
+            try
+              if ((id of session si of tab ti of window wi) as string) is "%(key)s" then
+                tell session si of tab ti of window wi to write text (character id 21) newline NO
+                return "OK"
+              end if
+            end try
+          end repeat
+        end try
+      end repeat
+    end try
+  end repeat
+  return "NOTFOUND"
+end tell
+'''
+
+
+def input_box(screen, tail_lines):
+    """What is sitting in the input box right now, or None if there is no box."""
+    lines = [l.rstrip() for l in screen.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    for line in reversed(lines[-tail_lines:]):
+        m = PROMPT_LINE.match(line)
+        if m:
+            return m.group(1).replace(u"\xa0", u" ").strip()
+    return None
+
+
+def is_stalled_injection(screen, tail_lines, retry_text):
+    """Is our own retry text sitting unsubmitted in the input box?
+
+    `do script` hands Terminal.app the text and the return in a single write and
+    a TUI can take that for a paste: the text lands in the box and nothing is
+    submitted. The box then stays non-empty forever -- which is exactly what
+    this watchdog refuses to type into, so one mistimed injection shields the
+    session from every later rescue. That is not hypothetical: it cost a real
+    session nine and a half hours parked on a drop, with the log correctly
+    reporting "input box not empty" every second of it.
+
+    Equality, not containment: text the *user* typed that merely starts with the
+    retry prompt is theirs, and must not be cleared.
+    """
+    body = input_box(screen, tail_lines)
+    return body is not None and body == (retry_text or "").strip()
+
+
+def clear_input_box(sess):
+    """Send Ctrl-U to this session. Returns (ok, detail)."""
+    app = sess["app"]
+    if app == "tmux":
+        _, err = run(["tmux", "send-keys", "-t", sess["key"], "C-u"], timeout=15)
+        return (err is None), (err or "OK")
+    if app == "iTerm2":
+        script = ITERM_CLEAR % {"key": esc(sess["key"])}
+    else:
+        wid, _, ti = sess["key"].partition(":")
+        script = TERMINAL_CLEAR % {"wid": esc(wid), "ti": esc(ti or "1")}
+    out, err = osa(script, timeout=25)
+    if err:
+        return False, err
+    return (out or "").strip() == "OK", (out or "").strip()
+
+
+def reread_screen(sess):
+    """This one session's screen, fresh. None when there is no cheap way to get it."""
+    if sess["app"] == "Terminal":
+        wid, _, ti = sess["key"].partition(":")
+        out, err = osa(TERMINAL_TAB_READ % {"wid": esc(wid), "ti": esc(ti or "1")}, timeout=20)
+        return None if err else (out or "")
+    if sess["app"] == "tmux":
+        out, err = run(["tmux", "capture-pane", "-p", "-t", sess["key"]], timeout=15)
+        return None if err else (out or "")
+    return None                    # iTerm2 exposes no cheap single-session read
+
+
 def esc(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -587,12 +763,14 @@ def scan_once(cfg, state, act=True):
     triggers = read_triggers(cfg["trigger_ttl_sec"]) if cfg.get("use_hook_triggers", True) else {}
     report = []
     seen_keys = set()
+    tty_by_sid = {}
 
     for s in sessions:
         sid = "%s:%s" % (s["app"], s["key"])
         if sid in seen_keys:       # duplicate key in one sweep: trust the first
             continue
         seen_keys.add(sid)
+        tty_by_sid[sid] = s["tty"]
         st = state.setdefault(sid, {"streak": 0, "consecutive": 0, "last_sent": 0, "last_fp": ""})
 
         if s["tty"] in (cfg.get("exclude_tty") or []):
@@ -620,6 +798,23 @@ def scan_once(cfg, state, act=True):
             if trig and "busy" in reason:
                 _drop(trig["_path"])       # it recovered on its own; void the ticket
                 reason += "; ticket voided"
+            # An injection of ours that stalled in the input box blocks every
+            # later rescue of this session, including this one. Clear it and let
+            # the next sweep act; the ticket is deliberately left pending.
+            elif (reason.startswith("input box not empty")
+                    and (trig or ERR_TEXT.search(_norm(s["screen"])))
+                    and is_stalled_injection(s["screen"], cfg["tail_lines"], cfg["retry_text"])):
+                if not act or cfg["dry_run"] or os.path.exists(PAUSE_FLAG):
+                    reason += "; would clear a stalled injection"
+                elif time.time() - st.get("last_clear", 0) < cfg["cooldown_sec"]:
+                    reason += "; stalled injection, clear cooling down"
+                else:
+                    st["last_clear"] = time.time()
+                    cleared, detail = clear_input_box(s)
+                    log("%s a stalled %r from the input box | %s | %s | %s"
+                        % ("CLEARED" if cleared else "FAILED to clear",
+                           cfg["retry_text"], sid, s["tty"], detail))
+                    reason += "; cleared a stalled injection" if cleared else "; clear failed"
             report.append((sid, s["title"], "ok: %s" % reason))
             continue
 
@@ -645,6 +840,19 @@ def scan_once(cfg, state, act=True):
             log("DRY %s | %s | %s | would inject" % (sid, s["tty"], s["title"]))
             continue
 
+        # The screen this decision rests on is up to a full sweep old, and a
+        # session can wake in that gap -- a task notification is enough. Typing
+        # into it then leaves the text sitting unsubmitted in the input box,
+        # which shields the session from every later rescue. Re-read the one tab
+        # and stand down if it moved. This can only ever cancel an injection.
+        fresh = reread_screen(s)
+        if fresh is not None:
+            still, why, _fp = analyze(fresh, cfg["tail_lines"], require_error=False)
+            if not still:
+                report.append((sid, s["title"], "stood down at the last moment: %s" % why))
+                st["streak"] = 0
+                continue
+
         ok, detail = send_retry(s, cfg["retry_text"])
         st["last_sent"] = time.time()
         st["last_fp"] = fp
@@ -663,6 +871,21 @@ def scan_once(cfg, state, act=True):
         else:
             log("FAIL %s | %s | injection failed: %s" % (sid, s["tty"], detail))
             report.append((sid, s["title"], "injection failed: %s" % detail))
+
+    # A pending ticket that is not acted on must say why, every time the
+    # reason changes. Silence here is what makes a missed drop unexplainable.
+    verdicts = {}
+    for row_sid, _row_title, row_msg in report:
+        row_tty = tty_by_sid.get(row_sid)
+        if row_tty:
+            verdicts[row_tty] = row_msg
+    _LAST_VERDICT.clear()
+    _LAST_VERDICT.update(verdicts)
+    for trig_tty, trig_rec in triggers.items():
+        if not os.path.exists(trig_rec["_path"]):
+            continue                    # consumed or voided this sweep
+        msg = verdicts.get(trig_tty, "no terminal session reports this tty")
+        ticket_note(trig_rec["_path"], trig_tty, msg)
 
     for k in list(state.keys()):
         if k not in seen_keys:

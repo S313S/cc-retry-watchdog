@@ -13,12 +13,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from watchdog import analyze  # noqa: E402
+from watchdog import analyze, is_stalled_injection  # noqa: E402
 
 TAIL = 80
 BOX = "─" * 60
 STATUS = ("  [Opus 5] ░░░░░░░░░░ 116.0k (12%)\n"
           "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents")
+
+AGENTS = ('  ⏺ main\n  ◯ general-purpose  Reading run_sectioned_task in sectioning.py                    2m 24s · ↓ 66.9k tokens')
 
 CASES = []
 
@@ -83,6 +85,84 @@ case("parked: input box shows only the placeholder hint", True, u"""\
 {box}
 {status}""".format(box=BOX, status=STATUS))
 
+case("parked: 'Connection lost' wording instead of 'closed'", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+* Baked for 7m 22s
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: a manual retry of a 'lost' drop dropped again", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+* Baked for 7m 22s
+
+❯ please, continue
+
+● API Error: Connection lost mid-response. The response
+  above may be incomplete.
+
+* Crunched for 27s
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: 'The response stopped arriving'", True, u"""\
+⏺ Running the migration now.
+
+● API Error: The response stopped arriving. The response above may be incomplete.
+
+* Simmered for 3m 4s
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: server error mid-response", True, u"""\
+● API Error: Server error mid-response. The response above may be incomplete.
+* Deliberated for 41s
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: laptop slept mid-response", True, u"""\
+● API Error: Your computer went to sleep mid-response. The response
+  above may be incomplete.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: nothing produced yet -- 'Try again.'", True, u"""\
+❯ summarize the worklog
+
+● API Error: Connection lost before a response was produced. Try again.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: pre-2.1.226 'while thinking' wording", True, u"""\
+● API Error: Response stalled while thinking, before producing a response. Try again.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: transport error raised around the stream", True, u"""\
+● API Error: Connection to the API was lost (ECONNRESET). This is usually
+  temporary — try again.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
 case("hook ticket: idle session, no error on screen", True, u"""\
 ⏺ Wrote docs/design/schema.md.
 
@@ -93,7 +173,80 @@ case("hook ticket: idle session, no error on screen", True, u"""\
 {status}""".format(box=BOX, status=STATUS), require_error=False)
 
 
+# A background agent outlives the turn the drop killed, so the agent panel keeps
+# drawing under the error. This read as "the turn moved on" and cost a real
+# session eleven hours parked on a drop nobody retried.
+
+case("parked: a background agent is still running", True, u"""\
+⏺ D-008 卡与诊断已落档，造红 agent 正在补 case。
+
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✻ Churned for 59m 4s
+✻ Waiting for 1 background agent to finish
+
+{box}
+❯
+{box}
+{status}
+{agents}""".format(box=BOX, status=STATUS, agents=AGENTS))
+
+case("parked: several background agents still running", True, u"""\
+● API Error: The response stopped arriving. The response above may be incomplete.
+
+✻ Waiting for 3 background agents to finish
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: a background agent reported back", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+⏺ Agent "诊断：第二轮执行期的时间去向" finished · 6m 32s
+✻ Waiting for 1 background agent to finish
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: backgrounded-agent receipt under the error", True, u"""\
+● API Error: Server error mid-response. The response above may be incomplete.
+
+  ⎿ Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+
 # ---------------------------------------------------------------- must NOT fire
+
+# The mirror image of the four above: the main loop is the one drawing again, so
+# the turn genuinely moved on and a retry would trample it.
+
+case("the main loop came back and launched an agent", False, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+⏺ Agent(造红：seam 补 section-wall-clock case)
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("the main loop came back and kept writing", False, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+⏺ 诊断很硬，五条根因（带文件:行），先造红。
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
 
 case("finished normally, waiting for the user", False, u"""\
 File: docs/design/semantic-recall.md (worklog snapshot alongside).
@@ -223,6 +376,74 @@ case("hook ticket but the user is typing", False, u"""\
 {box}
 {status}""".format(box=BOX, status=STATUS), require_error=False)
 
+# An "API Error:" that is a real failure, not a dropped stream. Retrying these
+# burns a turn at best; for the 400s it re-sends what the server just rejected.
+
+case("api error: the user pressed esc", False, u"""\
+● API Error: Request was aborted.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("api error: bad credentials", False, u"""\
+● API Error: 401 Invalid API key · Please run /login
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("api error: malformed tool_use in history", False, u"""\
+● API Error: 400 duplicate tool_use ID in conversation history.
+  Run /rewind to recover the conversation.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("api error: context window exhausted", False, u"""\
+● API Error: The model has reached its context window limit.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("api error: bare fallback with no detail", False, u"""\
+● API Error: Please wait a moment and try again.
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+
+# ---------------------------------------------------------- stalled injections
+#
+# An injection that lands as a paste leaves the retry text sitting unsubmitted
+# in the input box. The box is then non-empty forever, which is exactly what the
+# watchdog refuses to type into -- so the session can never be rescued again
+# until someone clears it. Recognizing that state is what makes it recoverable;
+# recognizing it too eagerly would delete text the user typed.
+
+STALL_CASES = []
+
+
+def stall(name, expect, body):
+    STALL_CASES.append((name, expect, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+{box}
+❯ {body}
+{box}
+{status}""".format(box=BOX, status=STATUS, body=body)))
+
+
+stall("our retry text, stalled in the box", True, u"please, continue")
+stall("same, with the non-breaking space the TUI draws", True, u"\xa0please, continue")
+stall("empty box is not a stall", False, u"")
+# Must not fire: everything below is the user's own text and clearing it is theft.
+stall("the user typed their own message", False, u"回到 D-008，先跑复验")
+stall("the user's text merely starts with it", False, u"please, continue with the refactor")
+stall("the user's text merely contains it", False, u"as I said: please, continue")
+
 
 def main():
     ok = fail = 0
@@ -234,6 +455,14 @@ def main():
         else:
             fail += 1
             print("  FAIL  %-46s expected %s got %s (%s)" % (name, expect, got, reason))
+    for name, expect, screen in STALL_CASES:
+        got = is_stalled_injection(screen, TAIL, "please, continue")
+        if got == expect:
+            ok += 1
+            print("  PASS  stalled=%-5s %s" % (got, name))
+        else:
+            fail += 1
+            print("  FAIL  stalled: %-46s expected %s got %s" % (name, expect, got))
     print("\n%d passed / %d failed" % (ok, fail))
     return 1 if fail else 0
 

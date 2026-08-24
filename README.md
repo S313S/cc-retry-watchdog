@@ -3,8 +3,11 @@
 Claude Code stops dead when a response stream is cut mid-flight:
 
 ```
-● API Error: Connection closed mid-response. The response above may be incomplete.
+● API Error: Connection lost mid-response. The response above may be incomplete.
 ```
+
+That is one of eleven wordings for the same event — see
+[What counts as a drop](#what-counts-as-a-drop).
 
 No countdown, no retry — the turn is finalized and the session sits there until a
 human types something. On long autonomous runs this is the difference between
@@ -51,6 +54,40 @@ One local data point on cause: across 160 drops the time-to-failure had a median
 of 22s and a max of 203s, with no clustering at the 180s/300s watchdog thresholds
 — consistent with the network path cutting the connection rather than a watchdog
 aborting it. Tuning those timeouts is not the fix.
+
+---
+
+## What counts as a drop
+
+The trigger is an allowlist of exact messages, taken from the strings compiled
+into the `claude` binary rather than from what happened to appear on someone's
+screen. Claude Code rewrote this message set in **2.1.226** — `closed` became
+`lost`, and the two generic messages split into one per cause — so both
+generations are matched and an upgrade or rollback changes nothing:
+
+| ≤ 2.1.225 | ≥ 2.1.227 |
+|---|---|
+| `Response stalled mid-stream` | `The response stopped arriving` |
+| `Connection closed mid-response` | `Connection lost mid-response` |
+| `Server error mid-response` | `Server error mid-response` |
+| — | `Your computer went to sleep mid-response` |
+
+Those finalize a turn that had already streamed something, so they end in *"The
+response above may be incomplete."* The same failures before any content is
+produced end in *"Try again."* and are matched too — `Response stalled while
+thinking` / `Connection closed while thinking` on the old build, `The response
+stalled` / `Connection lost` / `Your computer went to sleep before a response was
+produced` on the new one — along with `Connection to the API was lost (<code>)`,
+which is raised around the stream rather than inside it.
+
+Deliberately **not** matched, because a retry would only burn a turn:
+`Request was aborted` (you pressed esc), `401 Invalid API key`, the `400`s for
+tool-use concurrency and duplicate `tool_use` IDs, `The model has reached its
+context window limit`, and the bare `Please wait a moment and try again`
+fallback. The match never keys on the `API Error:` prefix alone.
+
+To re-derive the list after an upgrade, see the header of
+`tests/test_messages.py`.
 
 ---
 
@@ -134,19 +171,52 @@ Either way it refuses to act unless **all** of these hold:
   built-in `Retrying in Ns · attempt n/m`, so it never interrupts self-recovery;
 - the input box is empty, so half-typed text is never clobbered;
 - a claude process is actually running there;
-- cooldown elapsed (30s) and the per-session retry cap (6) is not exhausted.
+- cooldown elapsed (30s) and the per-session retry cap (6) is not exhausted;
+- and all of it still holds at the instant of typing. The one tab is re-read
+  immediately before the keystrokes go out, because a session can wake inside
+  that gap — a task notification from a background agent is enough. Typing into
+  a session that just woke leaves the text sitting *unsubmitted* in its input
+  box, and a non-empty input box is exactly what this refuses to touch: one
+  mistimed injection would shield the session from every later rescue.
 
 Situations it deliberately ignores: a turn that finished normally and is waiting
 for you, a session that already recovered and kept writing, a permission prompt,
 a subagent error while the main loop runs on, and the error text merely appearing
 in conversation.
 
-`tests/test_analyze.py` pins all of this — 20 hand-reproduced terminal layouts,
-half of them "must not fire". Run it after changing any pattern:
+### When an injection stalls
+
+The guard above has a failure mode of its own. `do script` hands Terminal.app
+the text and the return in a single write, and a TUI can take that for a paste:
+the text lands in the input box and nothing is submitted. The box is then
+non-empty forever — which is exactly what the watchdog refuses to type into, so
+**one mistimed injection shields the session from every later rescue.** That is
+not hypothetical; it cost a real session nine and a half hours parked on a drop,
+with the log correctly reporting `input box not empty` every second of it.
+
+So a box holding *exactly* the retry text, on a session that otherwise wants
+rescuing, is recognized as a stalled injection of our own and cleared with
+Ctrl-U; the pending ticket is deliberately left alone, and the next sweep
+injects normally. Equality, not containment: text the user typed that merely
+starts with or contains the retry prompt is theirs, and is never touched.
+Pressing return again — the obvious alternative — does not submit a box in this
+state; that was tried against a live session before Ctrl-U was.
+
+A background agent that outlives the dead turn is *not* one of them. Its panel
+keeps drawing under the error long after the main loop is parked, which used to
+read as "the turn moved on" and left the fallback blind -- one real drop sat
+unretried for eleven hours that way. That chrome is now recognized; anything the
+main loop itself emits after the error still disqualifies the session.
+
+Two suites pin all of this. Run both after changing any pattern:
 
 ```bash
-python3 tests/test_analyze.py
+python3 tests/test_analyze.py    # 45 hand-reproduced terminal layouts
+python3 tests/test_messages.py   # 25 real CLI strings, fire vs must-not-fire
 ```
+
+Over half of the cases in each are "must not fire" — that is the side where a
+bug costs something, since a false positive types into a session you are using.
 
 ---
 
@@ -194,6 +264,11 @@ fights with them.
 
 Things that cost real debugging time, recorded so nobody repeats them:
 
+- **A ticket must never expire without saying why.** A pending ticket that is
+  held back logs its reason (`ticket held | <tty> | <reason>`) each time that
+  reason changes, and the expiry line repeats the last verdict. Before that, a
+  missed drop left nothing in the log but `expired`, and no way to tell whether
+  the session had looked busy, unrecognized, or absent.
 - **Terminal.app's scripting dictionary fails silently, twice.**
   `repeat with w in windows` yields nothing — you must index `window wi`. And
   `set tb to tab ti of window wi` followed by `contents of tb` returns empty —
