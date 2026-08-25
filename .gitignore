@@ -3,6 +3,7 @@
 # they must not swallow examples/config.json.
 /config.json
 /state.json
+/sessions.json
 /watchdog.pid
 /watchdog.log
 /daemon.out.log

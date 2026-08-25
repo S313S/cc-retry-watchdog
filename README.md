@@ -302,10 +302,38 @@ adds; automating it just makes it happen more often. Set
 | `exclude_tty` | `[]` | e.g. `["/dev/ttys003"]` |
 | `watch_terminal_app` / `watch_iterm` / `watch_tmux` | `true` | per-backend switches |
 | `tail_lines` | `80` | how much of the screen bottom to inspect |
+| `snapshot` | `true` | write `sessions.json` after every sweep — see [For other tools](#for-other-tools) |
 
 State, logs and tickets live in `~/.claude/cc-autoresume/` (override with
 `CC_AUTORESUME_HOME`), deliberately outside the checkout so `git pull` never
 fights with them.
+
+---
+
+## For other tools
+
+The watchdog is the one process that already reads every terminal, so after
+each sweep it publishes what it saw to `~/.claude/cc-autoresume/sessions.json`
+(written atomically; `snapshot: false` turns it off):
+
+```json
+{"ts": 1724570005.1, "pid": 48211, "sessions": [
+  {"sid": "Terminal:44939:1", "app": "Terminal", "key": "44939:1", "tty": "/dev/ttys000",
+   "title": "proj-a — claude", "state": "working", "since": 1724569980.4,
+   "verdict": "ok: session busy (esc to interrupt)"}
+]}
+```
+
+`state` is one of `working` · `idle` (turn over, waiting for a human) · `typing`
+(input box not empty) · `dropped` (parked on a drop, retry in progress) ·
+`gave_up` (retry cap hit — needs a human) · `skipped` · `not_claude_ui`.
+`since` is when the session entered that state; `verdict` is the exact reason
+from the sweep, the same text `ccwatch check` prints.
+
+This is strictly an output — nothing in the retry decision reads it back. It
+exists so a companion tool can answer *"which terminal is waiting for me?"*
+without running a second AppleScript sweep of its own; that tool is
+[cc-needs-you](https://github.com/S313S/cc-needs-you).
 
 ---
 

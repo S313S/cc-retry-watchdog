@@ -265,9 +265,34 @@ python3 tests/test_messages.py   # 25 条真实 CLI 文案，该触发 / 绝不�
 | `exclude_tty` | `[]` | 如 `["/dev/ttys003"]` |
 | `watch_terminal_app` / `watch_iterm` / `watch_tmux` | `true` | 分后端开关 |
 | `tail_lines` | `80` | 只看屏幕末尾多少行 |
+| `snapshot` | `true` | 每次扫描后写 `sessions.json`——见[给其他工具用](#给其他工具用) |
 
 状态、日志、工单都在 `~/.claude/cc-autoresume/`（可用 `CC_AUTORESUME_HOME` 覆盖），
 故意放在代码目录之外，这样 `git pull` 不会和它们打架。
+
+---
+
+## 给其他工具用
+
+watchdog 是那个本来就要读遍所有终端的进程，所以每次扫描结束后它把看到的东西
+写到 `~/.claude/cc-autoresume/sessions.json`（原子写入；`snapshot: false` 可关掉）：
+
+```json
+{"ts": 1724570005.1, "pid": 48211, "sessions": [
+  {"sid": "Terminal:44939:1", "app": "Terminal", "key": "44939:1", "tty": "/dev/ttys000",
+   "title": "proj-a — claude", "state": "working", "since": 1724569980.4,
+   "verdict": "ok: session busy (esc to interrupt)"}
+]}
+```
+
+`state` 取值：`working` · `idle`（这一轮结束了，在等人）· `typing`（输入框里有字）·
+`dropped`（停在掉线上，重试进行中）· `gave_up`（打到重试上限——需要人）·
+`skipped` · `not_claude_ui`。`since` 是进入当前状态的时间；`verdict` 是这次扫描给出的
+原话，和 `ccwatch check` 打印的一样。
+
+这是纯输出——重试判定不会读它。它存在的目的，是让一个伴生工具可以回答
+"哪个终端在等我"，而不用自己再跑一遍 AppleScript 扫描；那个工具是
+[cc-needs-you](https://github.com/S313S/cc-needs-you)。
 
 ---
 

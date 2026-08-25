@@ -56,6 +56,7 @@ STATE_PATH = os.path.join(BASE, "state.json")
 LOG_PATH = os.path.join(BASE, "watchdog.log")
 PAUSE_FLAG = os.path.join(BASE, "PAUSED")       # this file exists => never inject
 TRIG_DIR = os.path.join(BASE, "triggers")       # tickets dropped by the hook
+SNAPSHOT_PATH = os.path.join(BASE, "sessions.json")  # what the last sweep saw, for other tools
 LOG_MAX_BYTES = 2 * 1024 * 1024
 
 DEFAULTS = {
@@ -75,6 +76,7 @@ DEFAULTS = {
     "use_hook_triggers": True,   # trust tickets left by the StopFailure hook
     "trigger_ttl_sec": 180,      # tickets older than this are discarded
     "fast_poll_sec": 1,          # poll interval while a ticket is pending
+    "snapshot": True,            # write sessions.json after every sweep (read by cc-needs-you)
 }
 
 # ---------------------------------------------------------------- patterns
@@ -890,7 +892,84 @@ def scan_once(cfg, state, act=True):
     for k in list(state.keys()):
         if k not in seen_keys:
             del state[k]
+
+    if cfg.get("snapshot", True):
+        write_snapshot(sessions, report, SNAPSHOT_PATH)
     return report
+
+
+# ---------------------------------------------------------------- snapshot
+
+# The watchdog is the one process that already reads every terminal, so it
+# publishes what it saw for anyone else who needs it -- cc-needs-you, the
+# "which terminal is waiting for me" companion, consumes this file instead of
+# running a second AppleScript sweep of its own. This is strictly an output:
+# nothing in the retry decision reads it back.
+
+# Coarse per-session state, derived from the sweep verdict. The verdict strings
+# are the log's contract already; keeping the mapping here, in one place, means
+# a reworded reason breaks a test rather than a downstream tool silently.
+_STATE_RULES = (
+    ("skipped",                     "skipped"),        # excluded, or no claude here
+    ("session busy",                "working"),
+    ("stood down",                  "working"),        # it moved between sweeps
+    ("input box not empty",         "typing"),
+    ("no such error this turn",     "idle"),           # turn over, waiting for a human
+    ("output after the error",      "idle"),
+    ("recap after the error",       "idle"),
+    ("retry cap",                    "gave_up"),        # parked, and we will not retry again
+    ("no input box found",          "not_claude_ui"),
+    ("blank screen",                "not_claude_ui"),
+    ("empty content area",          "not_claude_ui"),
+)
+
+
+def session_state(msg):
+    for needle, state in _STATE_RULES:
+        if needle in msg:
+            return state
+    return "dropped"       # stuck / cooling down / injected / would inject / injection failed
+
+
+_SNAP_SINCE = {}           # sid -> (state, first seen in that state)
+
+
+def write_snapshot(sessions, report, path):
+    """Publish the last sweep as JSON. Never raises: a snapshot that fails
+    must not cost a rescue."""
+    try:
+        verdict = {}
+        for sid, _title, msg in report:
+            verdict.setdefault(sid, msg)
+        now_ts = time.time()
+        rows = []
+        seen = set()
+        for s in sessions:
+            sid = "%s:%s" % (s["app"], s["key"])
+            if sid in seen:
+                continue
+            seen.add(sid)
+            msg = verdict.get(sid, "")
+            st = session_state(msg)
+            prev = _SNAP_SINCE.get(sid)
+            since = prev[1] if prev and prev[0] == st else now_ts
+            _SNAP_SINCE[sid] = (st, since)
+            rows.append({
+                "sid": sid,
+                "app": s["app"],
+                "key": s["key"],
+                "tty": s["tty"],
+                "title": s["title"],
+                "state": st,
+                "since": round(since, 3),
+                "verdict": msg,
+            })
+        for k in list(_SNAP_SINCE.keys()):
+            if k not in seen:
+                del _SNAP_SINCE[k]
+        save_json(path, {"ts": round(now_ts, 3), "pid": os.getpid(), "sessions": rows})
+    except Exception as e:
+        log("WARN snapshot failed: %r" % e)
 
 
 def main():

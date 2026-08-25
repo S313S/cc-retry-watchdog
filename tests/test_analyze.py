@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from watchdog import analyze, is_stalled_injection  # noqa: E402
+from watchdog import analyze, is_stalled_injection, session_state  # noqa: E402
 
 TAIL = 80
 BOX = "─" * 60
@@ -444,6 +444,32 @@ stall("the user typed their own message", False, u"回到 D-008，先跑复验")
 stall("the user's text merely starts with it", False, u"please, continue with the refactor")
 stall("the user's text merely contains it", False, u"as I said: please, continue")
 
+# The sessions.json snapshot maps every sweep verdict to a coarse state that
+# cc-needs-you reads. A reworded verdict must fail here, not confuse a tool
+# downstream. One case per verdict wording scan_once can emit.
+STATE_CASES = [
+    ("skipped: tty excluded",                                        "skipped"),
+    ("skipped: title excluded",                                      "skipped"),
+    ("skipped: no claude process here",                              "skipped"),
+    ("ok: session busy (esc to interrupt)",                          "working"),
+    ("ok: session busy (Retrying in\\s+\\d+s); ticket voided",       "working"),
+    ("stood down at the last moment: session busy (esc to interrupt)", "working"),
+    ("ok: input box not empty (draft), skipping",                     "typing"),
+    ("ok: input box not empty (please, continue), skipping; cleared a stalled injection", "typing"),
+    ("ok: no such error this turn",                                  "idle"),
+    ("ok: output after the error (Let me try) -- turn moved on",     "idle"),
+    ("ok: recap after the error -- turn ended normally",             "idle"),
+    ("ok: no input box found -- probably not a Claude Code UI",      "not_claude_ui"),
+    ("ok: blank screen",                                             "not_claude_ui"),
+    ("ok: empty content area",                                       "not_claude_ui"),
+    ("stuck but hit the retry cap (6) -- needs a human",             "gave_up"),
+    ("looks stuck (1/2 confirmations)",                              "dropped"),
+    ("stuck but cooling down (12s left)",                            "dropped"),
+    ("[DRY-RUN] would inject 'please, continue'",                    "dropped"),
+    ("injected 'please, continue' (hook, retry #1)",                 "dropped"),
+    ("injection failed: osascript timed out",                        "dropped"),
+]
+
 
 def main():
     ok = fail = 0
@@ -463,6 +489,14 @@ def main():
         else:
             fail += 1
             print("  FAIL  stalled: %-46s expected %s got %s" % (name, expect, got))
+    for msg, expect in STATE_CASES:
+        got = session_state(msg)
+        if got == expect:
+            ok += 1
+            print("  PASS  state=%-13s %s" % (got, msg[:50]))
+        else:
+            fail += 1
+            print("  FAIL  state: %-46s expected %s got %s" % (msg[:46], expect, got))
     print("\n%d passed / %d failed" % (ok, fail))
     return 1 if fail else 0
 
