@@ -31,6 +31,31 @@ def case(name, expect, screen, require_error=True):
 
 # ---------------------------------------------------------------- must fire
 
+# The duration line carries " · ..." suffixes: the wall-clock finish time
+# (always, in practice), a token budget, hidden-message and still-running
+# notes. Anchoring the pattern at the duration made every one of them read as
+# "the turn moved on", which took the polling path out of service entirely --
+# a real session sat parked for 71 minutes on the first fixture below.
+case("parked: duration line carries the done-at time", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✳ Cogitated for 1h 5m 49s · done 19:14
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+case("parked: duration line carries budget and hidden-message notes", True, u"""\
+● API Error: Server error mid-response. The response above may be incomplete.
+
+* Churned for 25s · 12.3k / 50k (25%) · 2 nudges · 3 messages hidden (/focus to show)
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
 case("parked: only a duration line after the error", True, u"""\
 ⏺ Let me write that into the design doc.
 

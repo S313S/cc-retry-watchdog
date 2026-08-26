@@ -136,7 +136,16 @@ RULE_LINE = re.compile(r"^\s*[─━═┄╌—_\-╭╮╰╯│\s]{6,}$")
 # moved on and must not be retried.
 CHROME_AFTER_ERR = [
     RULE_LINE,
-    re.compile(r"^\s*\S{0,2}\s*[A-Za-z]+ for(?:\s+\d+[hms])+\s*$"),  # "* Brewed for 2m 45s"
+    # The turn-duration line. Claude Code renders it as
+    #     `${verb} for ${duration}${doneAt ? ` · done ${doneAt}` : ""}`
+    # and hangs further " · ..." segments off the same line: the wall-clock
+    # finish time, a token budget, "N messages hidden (/focus to show)",
+    # "<task> still running". `doneAt` is empty only for an invalid timestamp,
+    # so in practice the suffix is always there -- anchoring at the duration
+    # is what silently killed the whole polling path (SENT[poll] stayed 0
+    # while the hook did 160 rescues) and left one real session parked for 71
+    # minutes on "Cogitated for 1h 5m 49s · done 19:14".
+    re.compile(r"^\s*\S{0,2}\s*[A-Za-z]+ for(?:\s+\d+[hms])+(?:\s*·.*)?$"),  # "* Brewed for 2m 45s"
     re.compile(r"^\s*Jump to bottom", re.I),
     re.compile(r"(?:ctrl\+v to paste|/clear to save|to edit in Vim|Auto-update failed|Run claude doctor)\s*$", re.I),
     re.compile(r"^\s*❯\s*$"),
@@ -800,6 +809,10 @@ def scan_once(cfg, state, act=True):
             if trig and "busy" in reason:
                 _drop(trig["_path"])       # it recovered on its own; void the ticket
                 reason += "; ticket voided"
+                # The one branch that used to throw a ticket away in silence.
+                # When a drop goes unrescued this line is the only thing that
+                # can say the ticket arrived and what the screen looked like.
+                log("ticket voided | %s | %s" % (s["tty"], reason))
             # An injection of ours that stalled in the input box blocks every
             # later rescue of this session, including this one. Clear it and let
             # the next sweep act; the ticket is deliberately left pending.
