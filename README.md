@@ -1,7 +1,7 @@
 # cc-retry-watchdog
 
 <p align="center">
-  <b>Other tools let you see that Claude Code died.<br>
+  <b>Other tools let you see that Claude Code or Other Cli died.<br>
   This one brings it back while you were away.</b>
 </p>
 
