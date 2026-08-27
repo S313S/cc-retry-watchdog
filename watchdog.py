@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -760,9 +761,26 @@ def send_retry(sess, text):
     return (out or "").strip() == "OK", (out or "").strip()
 
 
+# One banner per rescue, rather than one that keeps being overwritten in place.
+#
+# AppleScript's `display notification` takes no identifier, so every notification
+# it posts carries the same one -- the sha1 of an empty string. macOS reads a
+# repeat of a known identifier as an update, and silently refreshes the record
+# already on screen instead of announcing a new one. Through a run of rescues
+# that looks like the notification firing only sometimes.
+#
+# terminal-notifier files each one separately. It is optional and not a
+# dependency: without it the AppleScript path still works, it just coalesces.
+_NOTIFIER = shutil.which("terminal-notifier") if IS_MAC else None
+
+
 def notify(title, msg):
-    if IS_MAC:
-        osa('display notification "%s" with title "%s"' % (esc(msg), esc(title)), timeout=10)
+    if not IS_MAC:
+        return
+    if _NOTIFIER:
+        run([_NOTIFIER, "-title", title, "-message", msg], timeout=10)
+        return
+    osa('display notification "%s" with title "%s"' % (esc(msg), esc(title)), timeout=10)
 
 
 # ---------------------------------------------------------------- main loop
