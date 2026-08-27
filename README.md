@@ -1,5 +1,31 @@
 # cc-retry-watchdog
 
+<p align="center">
+  <b>Other tools let you see that Claude Code died.<br>
+  This one brings it back while you were away.</b>
+</p>
+
+<p align="center">
+  <b>English</b> | <a href="README.zh-CN.md">中文文档</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
+  <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
+  <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
+  <img src="https://img.shields.io/badge/tests-70%20cases%20%C2%B7%20half%20must--not--fire-green" alt="70 test cases">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+</p>
+
+<!-- DEMO: drop a recording in docs/ and uncomment this block.
+     Caption it with what the viewer is watching, not with the tool name.
+<p align="center">
+  <img src="docs/demo.gif" alt="A stream drops; one second later the retry is typed into that terminal" width="820">
+</p>
+-->
+
+---
+
 Claude Code stops dead when a response stream is cut mid-flight:
 
 ```
@@ -16,16 +42,10 @@ human types something. On long autonomous runs this is the difference between
 This watchdog is that human. It notices the drop and types your retry prompt into
 that exact terminal, and nothing else.
 
-**English** · [中文](README.zh-CN.md)
-
-![macOS](https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black)
-![tmux](https://img.shields.io/badge/tmux-any%20platform-black)
-![Python](https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-
 [Is this you?](#is-this-you) ·
 [Why the built-in retry does not cover this](#why-the-built-in-retry-does-not-cover-this) ·
 [What counts as a drop](#what-counts-as-a-drop) ·
+[How this differs](#how-this-differs-from-the-other-claude-code-watchers) ·
 [Install](#install) ·
 [What it looks like](#what-it-looks-like) ·
 [Supported terminals](#supported-terminals) ·
@@ -122,13 +142,46 @@ To re-derive the list after an upgrade, see the header of
 
 ---
 
+## How this differs from the other Claude Code watchers
+
+Several tools watch Claude Code. Almost all of them answer *"what is it doing
+right now?"* — a status line, a dashboard, a phone or watch notification. This one
+answers a different question: *"it died while I was away; who types the retry?"*
+
+| Tool class | What it does on a mid-stream drop |
+|---|---|
+| Status lines, dashboards, watch apps | show the session as `Error` |
+| Wrapper-level retry tools | retry rate limits and 5xx, from outside the CLI |
+| This | detect the drop, decide it is safe, and type into that exact terminal |
+
+Three things worth knowing before you pick:
+
+- **It is an actuator, not a display.** Seeing the error is not the same as being
+  rescued — and you are reading this because you were not at the keyboard.
+- **It covers one failure class and only that one.** Not rate limits, not 5xx, not
+  usage caps; those already have retry paths. It covers the drop the built-in
+  retry structurally cannot take — see
+  [Why the built-in retry does not cover this](#why-the-built-in-retry-does-not-cover-this).
+- **Most of the work is in refusing to act.** Over half the cases in both test
+  suites are must-not-fire. A dashboard that mislabels a session costs nothing;
+  typing into a live session costs a turn — and once cost a real session nine and
+  a half hours.
+
+It does not conflict with any of them. Run them alongside it if you like; the
+`sessions.json` snapshot each sweep writes is there for exactly that.
+
+---
+
 ## Install
 
 ```bash
-git clone https://github.com/S313S/cc-retry-watchdog.git
-cd cc-retry-watchdog
-./install.sh --hook     # omit --hook to print the snippet instead of editing settings.json
+git clone https://github.com/S313S/cc-retry-watchdog.git ~/.cc-retry-watchdog && \
+  ~/.cc-retry-watchdog/install.sh --hook
 ```
+
+One line, nothing to uninstall but that directory. Omit `--hook` to have the
+snippet printed instead of `settings.json` edited. Clone it wherever you like —
+the installer symlinks `ccwatch` from wherever the checkout sits.
 
 Requires Python 3.6+ (stdlib only, no packages). `--hook` backs up
 `~/.claude/settings.json` before touching it and is idempotent.
@@ -377,7 +430,8 @@ Things that cost real debugging time, recorded so nobody repeats them:
 
 Grew out of [anthropics/claude-code#69415](https://github.com/anthropics/claude-code/issues/69415),
 where the `StopFailure` behaviour and the undocumented watchdog environment
-variables were first dug out of the binary. This repo is an external stand-in for
-the auto-resume layer proposed there, until something official lands.
+variables were first dug out of the binary. Everything here runs outside Claude Code and
+changes nothing inside it, so it behaves the same whether or not an official
+auto-resume ever lands.
 
 MIT licensed.

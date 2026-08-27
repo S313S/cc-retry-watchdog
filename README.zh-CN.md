@@ -1,5 +1,31 @@
 # cc-retry-watchdog
 
+<p align="center">
+  <b>别的工具让你看见 Claude Code 挂了；<br>
+  这个在你不在的时候把它接回来。</b>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> | <b>中文文档</b>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
+  <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
+  <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
+  <img src="https://img.shields.io/badge/tests-70%20cases%20%C2%B7%20half%20must--not--fire-green" alt="70 test cases">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+</p>
+
+<!-- DEMO: drop a recording in docs/ and uncomment this block.
+     Caption it with what the viewer is watching, not with the tool name.
+<p align="center">
+  <img src="docs/demo.gif" alt="A stream drops; one second later the retry is typed into that terminal" width="820">
+</p>
+-->
+
+---
+
 Claude Code 的响应流被中途掐断时，会直接停死：
 
 ```
@@ -13,16 +39,10 @@ Claude Code 的响应流被中途掐断时，会直接停死：
 
 这个守护就是那个"人"。它发现掉线后，把你的重试提示敲进**那一个**终端，别的什么都不做。
 
-[English](README.md) · **中文**
-
-![macOS](https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black)
-![tmux](https://img.shields.io/badge/tmux-any%20platform-black)
-![Python](https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-
 [这是你遇到的情况吗](#这是你遇到的情况吗) ·
 [为什么内置重试救不了它](#为什么内置重试救不了它) ·
 [什么算掉线](#什么算掉线) ·
+[和其他工具的差别](#和其他-claude-code-监控工具的差别) ·
 [安装](#安装) ·
 [它跑起来是什么样](#它跑起来是什么样) ·
 [支持的终端](#支持的终端) ·
@@ -108,13 +128,43 @@ while thinking`，新版是 `The response stalled` / `Connection lost` /
 
 ---
 
+## 和其他 Claude Code 监控工具的差别
+
+盯着 Claude Code 的工具不少。它们几乎都在回答「它现在怎么样了？」——状态栏、
+仪表盘、手机或手表通知。这个工具回答的是另一个问题：「它在我不在的时候死了，
+谁去敲那句重试？」
+
+| 工具类别 | 掉线时它做什么 |
+|---|---|
+| 状态栏 / 仪表盘 / 手表应用 | 把会话显示成 `Error` |
+| 外层重试类工具 | 在 CLI 之外重试限流和 5xx |
+| 本项目 | 发现掉线、判断此刻安全、把字敲进**那一个**终端 |
+
+选之前值得知道的三件事：
+
+- **它是执行器，不是显示器。** 看见错误不等于被救回来——而你会读到这里，
+  正是因为当时你不在键盘前。
+- **它只覆盖一类故障。** 不管限流、不管 5xx、不管额度用尽——那些本来就有重试
+  路径。它管的是内置重试在结构上接不住的那一种，见
+  [为什么内置重试救不了它](#为什么内置重试救不了它)。
+- **大部分工作是在判断什么时候不动手。** 两套测试里超过一半是 must-not-fire。
+  仪表盘标错一个会话不花任何代价；往一个活着的会话里敲字要赔上一轮——
+  而且真的赔过一次九个半小时。
+
+它和上面这些不冲突，可以一起跑；每一轮扫描写出的 `sessions.json` 快照就是
+留给它们的接口。
+
+---
+
 ## 安装
 
 ```bash
-git clone https://github.com/S313S/cc-retry-watchdog.git
-cd cc-retry-watchdog
-./install.sh --hook     # 不加 --hook 就只打印配置片段，不动 settings.json
+git clone https://github.com/S313S/cc-retry-watchdog.git ~/.cc-retry-watchdog && \
+  ~/.cc-retry-watchdog/install.sh --hook
 ```
+
+一行装完，要卸载就删掉那个目录。不加 `--hook` 就只打印配置片段，不动
+`settings.json`。仓库克隆到哪儿都行——安装脚本会从检出目录软链出 `ccwatch`。
 
 需要 Python 3.6+（只用标准库）。`--hook` 会先备份 `~/.claude/settings.json`，可重复执行。
 
@@ -325,6 +375,7 @@ watchdog 是那个本来就要读遍所有终端的进程，所以每次扫描�
 
 起于 [anthropics/claude-code#69415](https://github.com/anthropics/claude-code/issues/69415)，
 `StopFailure` 的行为和那些未公开的 watchdog 环境变量最早是在那里从二进制里挖出来的。
-本仓库是那个 issue 里提议的"自动恢复层"的外部替代品，直到官方实现落地为止。
+本仓库全部运行在 Claude Code 之外，不改动它内部的任何东西——所以无论官方将来
+是否推出自动恢复，它的工作方式都不变。
 
 MIT 许可。
