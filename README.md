@@ -17,12 +17,16 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
-<!-- DEMO: drop a recording in docs/ and uncomment this block.
-     Caption it with what the viewer is watching, not with the tool name.
 <p align="center">
-  <img src="docs/demo.gif" alt="A stream drops; one second later the retry is typed into that terminal" width="820">
+  <img src="docs/demo-cycle.gif" width="900"
+       alt="A stream drops; about a second later the retry is typed into that terminal">
 </p>
--->
+
+<p align="center">
+  <sub>One cycle, replayed from a script so you do not have to wait for a real drop:
+  the stream dies, and about a second later the retry is typed into that terminal.
+  The log lines under <a href="#what-it-looks-like">What it looks like</a> are from real ones.</sub>
+</p>
 
 ---
 

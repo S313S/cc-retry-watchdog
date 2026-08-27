@@ -13,3 +13,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Source recording for docs/demo-cycle.gif -- kept locally, too big for history
+/docs/*.mp4

@@ -17,12 +17,15 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
-<!-- DEMO: drop a recording in docs/ and uncomment this block.
-     Caption it with what the viewer is watching, not with the tool name.
 <p align="center">
-  <img src="docs/demo.gif" alt="A stream drops; one second later the retry is typed into that terminal" width="820">
+  <img src="docs/demo-cycle.gif" width="900"
+       alt="流被掐断；大约一秒后，重试被敲进那个终端">
 </p>
--->
+
+<p align="center">
+  <sub>一次循环，用脚本复现，省得等一次真实掉线：流断掉，大约一秒后重试被敲进那个终端。
+  下面<a href="#它跑起来是什么样">它跑起来是什么样</a>里的日志行来自真实掉线。</sub>
+</p>
 
 ---
 
