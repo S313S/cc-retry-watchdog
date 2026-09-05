@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-70%20cases%20%C2%B7%20half%20must--not--fire-green" alt="70 test cases">
+  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -166,8 +166,8 @@ Three things worth knowing before you pick:
   usage caps; those already have retry paths. It covers the drop the built-in
   retry structurally cannot take — see
   [Why the built-in retry does not cover this](#why-the-built-in-retry-does-not-cover-this).
-- **Most of the work is in refusing to act.** Over half the cases in both test
-  suites are must-not-fire. A dashboard that mislabels a session costs nothing;
+- **Most of the work is in refusing to act.** Over half the cases across the three
+  test suites are must-not-fire. A dashboard that mislabels a session costs nothing;
   typing into a live session costs a turn — and once cost a real session nine and
   a half hours.
 
@@ -265,6 +265,16 @@ Two independent paths.
 can leave a ticket naming the tty that just died. The watchdog acts on it within
 a second. No screen-reading involved; the drop is a known fact.
 
+A background job is the awkward case. Its turn does not run in the terminal tab
+you watch it through: the CLI daemon hosts it in a `claude bg-spare` process on a
+pty of its own, and that pty is what the hook finds when it walks up its parents.
+So the ticket arrives naming a tty no window owns. The job's state file under
+`~/.claude/jobs/<id>/` is the only bridge — it carries both the session id on the
+ticket and the task name the tab's title is built from — so the ticket is moved
+onto the tab showing that job. Two tabs that could be it, or none, and the ticket
+is left to expire rather than guessed at; the polling path sees the same screen a
+few seconds later anyway.
+
 **2. Screen polling — fallback, ~5s.** Reads what each terminal shows and
 recognizes the layout of a session parked on the error. Covers sessions that
 started before the hook was installed, and the case where the daemon was down.
@@ -314,11 +324,12 @@ starts with or contains the retry prompt is theirs, and is never touched.
 Pressing return again — the obvious alternative — does not submit a box in this
 state; that was tried against a live session before Ctrl-U was.
 
-Two suites pin all of this. Run both after changing any pattern:
+Three suites pin all of this. Run them after changing any pattern:
 
 ```bash
-python3 tests/test_analyze.py    # 45 hand-reproduced terminal layouts
+python3 tests/test_analyze.py    # 44 hand-reproduced terminal layouts
 python3 tests/test_messages.py   # 25 real CLI strings, fire vs must-not-fire
+python3 tests/test_tickets.py    # 17 cases on claiming a background job's ticket
 ```
 
 Over half of the cases in each are "must not fire" — that is the side where a

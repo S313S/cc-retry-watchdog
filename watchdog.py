@@ -15,7 +15,10 @@ Two independent ways of noticing a dead turn:
   1. The StopFailure hook (accurate, ~1s). Claude Code fires StopFailure when an
      API error ends a turn. The hook cannot resume the turn itself -- it is
      fire-and-forget, its stdout and exit code are ignored -- but it can leave a
-     ticket naming the tty that just died. See hook_stopfailure.py.
+     ticket naming the tty that just died. See hook_stopfailure.py. For a
+     background job that tty is the pty the CLI daemon hosts the job on, which
+     no window owns, so the ticket is moved onto the tab showing that job --
+     see job_for_session below.
   2. Screen polling (fallback, ~5s). Read what each terminal is showing and
      recognize the layout of a session parked on that error.
 
@@ -132,11 +135,21 @@ PROMPT_LINE = re.compile(r"^\s*[❯>]\s?(.*)$")
 # Placeholder hint inside the input box counts as empty.
 PLACEHOLDER = re.compile(r'^\s*(?:Try\s+"|/\s*$|$)')
 RULE_LINE = re.compile(r"^\s*[─━═┄╌—_\-╭╮╰╯│\s]{6,}$")
+# The same rule, with the session's name hung off it:
+#     ─────────────────────────────── report formatting review ─
+# Claude Code started drawing this above the input box, and RULE_LINE only
+# matches a bare line, so the label made it read as content -- which put every
+# session parked on a drop into "output after the error, the turn moved on"
+# and took the polling path out of service completely. Anchored on a long run
+# of box-drawing dashes: prose cannot open with ten of them, so a real output
+# line still disqualifies the turn the way it should.
+TITLED_RULE = re.compile(r"^\s*[─━═┄╌—]{10,}[^─━═┄╌—]{0,60}[─━═┄╌—]*\s*$")
 
 # Decoration allowed to appear after the error. Anything else means the turn
 # moved on and must not be retried.
 CHROME_AFTER_ERR = [
     RULE_LINE,
+    TITLED_RULE,
     # The turn-duration line. Claude Code renders it as
     #     `${verb} for ${duration}${doneAt ? ` · done ${doneAt}` : ""}`
     # and hangs further " · ..." segments off the same line: the wall-clock
@@ -483,6 +496,85 @@ def tickets_pending():
         return False
 
 
+# ------------------------------------------------------------- daemon jobs
+
+# A background job does not run in the terminal tab you watch it through. The
+# CLI daemon hosts its turn in a `claude bg-spare` process on a pty it made
+# itself, and that pty is what the hook sees when it walks up its parents --
+# so the ticket names a tty no window owns, and the rescue used to die there
+# with "no terminal session reports this tty". The job's own state file is the
+# one place that links the two ends: it carries the session id the ticket has,
+# and the task name the terminal builds its tab title from.
+JOBS_DIR = os.path.expanduser("~/.claude/jobs")
+
+
+def job_for_session(session_id):
+    """The daemon-hosted job this session id belongs to, or None."""
+    if not session_id:
+        return None
+    short = str(session_id)[:8]
+    try:
+        with open(os.path.join(JOBS_DIR, short, "state.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return None
+    if st.get("sessionId") and st.get("sessionId") != session_id:
+        return None                    # two jobs sharing an 8-char prefix
+    name = (st.get("name") or "").strip()
+    if len(name) < 4:
+        return None                    # too generic to name a tab by
+    return {"short": short, "name": name, "cwd": st.get("cwd") or ""}
+
+
+def session_showing_job(job, sessions):
+    """The one terminal session whose title says it is showing this job.
+
+    Ambiguity is declined rather than guessed. Losing the ticket costs a few
+    seconds -- the polling path sees the same drop on the same screen -- while
+    a wrong match types into somebody else's session.
+    """
+    base = os.path.basename(job["cwd"].rstrip("/")) if job["cwd"] else ""
+    hits = [s for s in sessions
+            if job["name"] in (s.get("title") or "")
+            and (not base or base in (s.get("title") or ""))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def rehome_daemon_tickets(triggers, sessions):
+    """Move tickets off daemon ptys and onto the tab showing that job.
+
+    Returns {pty: tab tty} so the sweep's verdict can be filed under both --
+    an expiring ticket reports itself by the tty it was written with.
+    """
+    alias = {}
+    owned = set(s["tty"] for s in sessions)
+    for pty in [t for t in triggers if t not in owned]:
+        rec = triggers[pty]
+        job = job_for_session(rec.get("session_id"))
+        if not job:
+            continue
+        target = session_showing_job(job, sessions)
+        if target is None or target["tty"] in triggers:
+            continue                   # no tab, or that tab has its own ticket
+        rec["_via"] = "%s %r" % (job["short"], job["name"])
+        triggers.pop(pty)
+        triggers[target["tty"]] = rec
+        alias[pty] = target["tty"]
+        log("ticket rehomed | %s -> %s | job %s | %s"
+            % (pty, target["tty"], rec["_via"], target["title"]))
+    return alias
+
+
+def unclaimed_note(rec):
+    """Why a ticket found no session, in terms the log can be read back from."""
+    job = job_for_session(rec.get("session_id"))
+    if job:
+        return ("no terminal session reports this tty -- the daemon hosts job "
+                "%s %r on it and no tab is showing that job"
+                % (job["short"], job["name"]))
+    return "no terminal session reports this tty"
+
+
 # ---------------------------------------------------------------- the decision
 
 def _norm(s):
@@ -530,7 +622,8 @@ def analyze(screen, tail_lines, require_error=True):
 
     # content area = everything above the input box (minus its rule line)
     end = prompt_idx
-    while end - 1 >= 0 and RULE_LINE.match(lines[end - 1]):
+    while end - 1 >= 0 and (RULE_LINE.match(lines[end - 1])
+                            or TITLED_RULE.match(lines[end - 1])):
         end -= 1
     content = lines[:end]
     while content and not content[-1].strip():
@@ -790,6 +883,7 @@ def scan_once(cfg, state, act=True):
     live = claude_ttys()
     excl_re = re.compile(cfg["exclude_title_regex"]) if cfg.get("exclude_title_regex") else None
     triggers = read_triggers(cfg["trigger_ttl_sec"]) if cfg.get("use_hook_triggers", True) else {}
+    ticket_alias = rehome_daemon_tickets(triggers, sessions) if triggers else {}
     report = []
     seen_keys = set()
     tty_by_sid = {}
@@ -894,7 +988,7 @@ def scan_once(cfg, state, act=True):
             _drop(trig["_path"])           # consumed either way; never reused
         if ok:
             st["consecutive"] = st.get("consecutive", 0) + 1
-            src = "hook" if trig else "poll"
+            src = ("hook/job" if trig.get("_via") else "hook") if trig else "poll"
             log("SENT[%s] %s | %s | %s | retry #%d"
                 % (src, sid, s["tty"], s["title"], st["consecutive"]))
             report.append((sid, s["title"], "injected %r (%s, retry #%d)"
@@ -912,12 +1006,15 @@ def scan_once(cfg, state, act=True):
         row_tty = tty_by_sid.get(row_sid)
         if row_tty:
             verdicts[row_tty] = row_msg
+    for pty, tab in ticket_alias.items():
+        if tab in verdicts:
+            verdicts[pty] = verdicts[tab]
     _LAST_VERDICT.clear()
     _LAST_VERDICT.update(verdicts)
     for trig_tty, trig_rec in triggers.items():
         if not os.path.exists(trig_rec["_path"]):
             continue                    # consumed or voided this sweep
-        msg = verdicts.get(trig_tty, "no terminal session reports this tty")
+        msg = verdicts.get(trig_tty) or unclaimed_note(trig_rec)
         ticket_note(trig_rec["_path"], trig_tty, msg)
 
     for k in list(state.keys()):

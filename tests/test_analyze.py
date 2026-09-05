@@ -441,6 +441,46 @@ case("api error: bare fallback with no detail", False, u"""\
 {status}""".format(box=BOX, status=STATUS))
 
 
+# The rule above the input box carries the session's name now. It is chrome,
+# but it reads as content, and content after the error means the turn moved on
+# -- so this one line silently took the whole polling path out of service.
+TITLED = u"─" * 52 + u" report formatting review ─"
+
+case("parked: the input box rule carries the session name", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✳ Brewed for 6m 46s · done 8:48
+
+{titled}
+❯
+{box}
+{status}""".format(titled=TITLED, box=BOX, status=STATUS))
+
+case("parked: named rule below a background-agent line", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✻ Waiting for 2 background agents to finish
+
+{titled}
+❯
+{box}
+{status}
+{agents}""".format(titled=TITLED, box=BOX, status=STATUS, agents=AGENTS))
+
+# Must not fire: the bound on the label is what keeps a real output line from
+# passing as a rule. A drawn separator the model printed itself is short; a
+# sentence that happens to open with one is not.
+case("moved on: output after the error opens with a drawn rule", False, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+{rule} the retry landed, here is what the second pass found in the loader path
+
+{box}
+❯
+{box}
+{status}""".format(rule=u"─" * 12, box=BOX, status=STATUS))
+
+
 # ---------------------------------------------------------- stalled injections
 #
 # An injection that lands as a paste leaves the retry text sitting unsubmitted

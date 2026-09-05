@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-70%20cases%20%C2%B7%20half%20must--not--fire-green" alt="70 test cases">
+  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -150,7 +150,7 @@ while thinking`，新版是 `The response stalled` / `Connection lost` /
 - **它只覆盖一类故障。** 不管限流、不管 5xx、不管额度用尽——那些本来就有重试
   路径。它管的是内置重试在结构上接不住的那一种，见
   [为什么内置重试救不了它](#为什么内置重试救不了它)。
-- **大部分工作是在判断什么时候不动手。** 两套测试里超过一半是 must-not-fire。
+- **大部分工作是在判断什么时候不动手。** 三套测试里超过一半是 must-not-fire。
   仪表盘标错一个会话不花任何代价；往一个活着的会话里敲字要赔上一轮——
   而且真的赔过一次九个半小时。
 
@@ -237,6 +237,13 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 **① StopFailure 钩子——准确，约 1 秒。** 钩子不能让回合自己续跑，但能留一张写明
 "哪个 tty 刚死了"的工单，守护 1 秒内响应。全程不看屏幕，掉线是确知的事实。
 
+后台任务是这里最别扭的一种。它的回合并不跑在你用来看它的那个标签页里：CLI 守护进程
+把它托管在一个 `claude bg-spare` 进程上，那个进程有自己的伪终端，而钩子沿父进程往上
+走，看到的正是这个伪终端。于是工单上写的 tty 没有任何窗口认领。`~/.claude/jobs/<id>/`
+下的任务状态文件是唯一的桥——它同时记着工单上的 session id 和标签页标题里的任务名，
+所以工单会被改挂到正在显示这个任务的标签页上。要是有两个标签页都对得上、或者一个都没
+有，就宁可让工单过期也不猜：反正几秒后轮询会看到同一块屏幕。
+
 **② 屏幕轮询——兜底，约 5 秒。** 读每个终端显示的内容，识别"停在报错上"的版面。
 覆盖装钩子之前就已启动的会话，以及守护当时没运行的情况。
 
@@ -275,14 +282,15 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 至于「再补一个回车」这个显而易见的替代方案：实测在这个状态下提交不了，是先拿真实
 会话验过 Ctrl-U 才落地的。
 
-两套测试把这些全钉死了。改任何一条规则后都跑一遍：
+三套测试把这些全钉死了。改任何一条规则后都跑一遍：
 
 ```bash
-python3 tests/test_analyze.py    # 45 个手工复刻的终端版面
+python3 tests/test_analyze.py    # 44 个手工复刻的终端版面
 python3 tests/test_messages.py   # 25 条真实 CLI 文案，该触发 / 绝不能触发
+python3 tests/test_tickets.py    # 17 条后台任务工单认领用例
 ```
 
-两套里都有一半以上是"绝不能触发"——出 bug 的代价在这一边：
+三套里都有一半以上是"绝不能触发"——出 bug 的代价在这一边：
 误判会往你正在用的会话里敲字。
 
 ---
