@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
+  <img src="https://img.shields.io/badge/tests-162%20cases%20%C2%B7%20half%20must--not--fire-green" alt="162 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -189,12 +189,18 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 ```
 [01:05:10] SENT[hook] Terminal:44939:1 | /dev/ttys000 | MarketingResearch — … | retry #1
 [01:22:47] ticket held | /dev/ttys000 | stood down at the last moment: session busy (Retrying in Ns)
-[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | OK
+[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | /dev/ttys005 | OK
+[01:31:36] ticket held | /dev/ttys004 | ok: input box not empty (continue), skipping; unchanged for 92s of the 120s grace
+[01:32:04] CLEARED an abandoned 'continue' from the input box | Terminal:118693:1 | /dev/ttys004 | OK
 ```
 
 第一行是一次救援，掉线一秒后完成。第二行是它**主动撤手**——那个会话当时正在走
 内置重试，打进去反而会打断它自我修复。第三行是它在修自己的烂摊子：一次早先的注入
 没能从输入框里发出去，被识别出来清掉了。
+
+第四、五行是同一种修复，只不过那段文字不是我们打的：输入框里的 `continue` 在流断掉
+之前就在那儿了，宽限期走完也没人碰过，于是清掉，让下一轮扫描把会话救回来。日志里
+把文字原样引出来是有意的——万一哪次误清了你排队的消息，这是你把它找回来的地方。
 
 ---
 
@@ -252,7 +258,8 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 - 报错是这一轮最后发生的事（轮询），或有工单确认（钩子）；
 - 会话空闲——没有 spinner、没有 `esc to interrupt`，尤其没有内置的
   `Retrying in Ns · attempt n/m`，绝不打断它自我修复；
-- 输入框是空的，你打了一半的字不会被冲掉；
+- 输入框是空的，你打了一半的字不会被冲掉——唯一的例外是工单能证明「掉线前就在框里、
+  之后一直没人碰」的文字，那种会被[清掉而不是覆盖](#当输入框里躺着别人留下的字)；
 - 那里确实有 claude 进程在跑；
 - 过了冷却期（30 秒）且该会话连续重试没超上限（6 次）；
 - 以及——在真正下键的那一瞬间，上面这些依然成立。敲字之前会**单独重读那一个 tab**，
@@ -282,15 +289,37 @@ ccwatch hook      # 钩子注册了吗？有没有待处理工单
 至于「再补一个回车」这个显而易见的替代方案：实测在这个状态下提交不了，是先拿真实
 会话验过 Ctrl-U 才落地的。
 
-三套测试把这些全钉死了。改任何一条规则后都跑一遍：
+### 当输入框里躺着别人留下的字
+
+相等判定只管我们自己打的那段，别的一概不管——可任何一行残留文字都会竖起同一面盾。
+2026-09-06 有一次真实掉线就这么没被救：输入框里躺着 `continue`，工单准时到了，
+watchdog 也确实是为了正确的理由在 hold，三分钟后工单过期作废。
+
+**文字本身**分不出「残留」和「Claude 干活时排队的消息」，所以判定完全交给时间，
+而且只在手里有工单时才做：
+
+* 这段文字在**流断掉之前就已经在框里**了——所以它不是用户看见报错之后正在打的回复；
+* 掉线之后 `stale_box_grace_sec` 这么久**一个字都没变**——所以人不在键盘前。排队的
+  消息是有主人的，主人会在一两分钟内对一个死掉的会话做出反应。任何一次编辑，哪怕只
+  改一个字，都会把这个计时重新归零。
+
+满足这两条才用 Ctrl-U 清掉，且只清一次，下一轮扫描正常注入。文字会在被清掉的同时
+写进日志，所以万一误伤了排队的消息，你能读回来重发一遍——把 `stale_box_grace_sec`
+设成 `0` 就整个关掉这个行为，只保留上面那条相等判定。
+
+这个取舍是故意的，而且不是白拿的：你排好队又离开两分钟的消息，可能会被丢掉、换成
+重试语发出去。跟它对比的另一头是：会话一直停在那儿，直到你哪天想起来看一眼。
+
+四套测试把这些全钉死了。改任何一条规则后都跑一遍：
 
 ```bash
-python3 tests/test_analyze.py    # 44 个手工复刻的终端版面
-python3 tests/test_messages.py   # 25 条真实 CLI 文案，该触发 / 绝不能触发
-python3 tests/test_tickets.py    # 17 条后台任务工单认领用例
+python3 tests/test_analyze.py       # 44 个手工复刻的终端版面
+python3 tests/test_messages.py      # 25 条真实 CLI 文案，该触发 / 绝不能触发
+python3 tests/test_tickets.py       # 17 条后台任务工单认领用例
+python3 tests/test_abandoned_box.py # 45 条清输入框、以及不清输入框的用例
 ```
 
-三套里都有一半以上是"绝不能触发"——出 bug 的代价在这一边：
+四套里都有一半以上是"绝不能触发"——出 bug 的代价在这一边：
 误判会往你正在用的会话里敲字。
 
 ---
@@ -322,6 +351,7 @@ python3 tests/test_tickets.py    # 17 条后台任务工单认领用例
 | `use_hook_triggers` | `true` | 是否采信钩子工单 |
 | `trigger_ttl_sec` | `180` | 工单多久算过期 |
 | `fast_poll_sec` | `1` | 有工单待处理时的间隔 |
+| `stale_box_grace_sec` | `120` | 掉线后输入框里的文字要原封不动地放多久，才算被遗弃并被清掉——见[当输入框里躺着别人留下的字](#当输入框里躺着别人留下的字)。设 `0` 关闭。必须明显小于 `trigger_ttl_sec`，否则每张工单都会先过期；不满足时日志会警告一次 |
 | `exclude_title_regex` | `""` | 标题命中就跳过 |
 | `exclude_tty` | `[]` | 如 `["/dev/ttys003"]` |
 | `watch_terminal_app` / `watch_iterm` / `watch_tmux` | `true` | 分后端开关 |

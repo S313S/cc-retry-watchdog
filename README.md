@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
+  <img src="https://img.shields.io/badge/tests-162%20cases%20%C2%B7%20half%20must--not--fire-green" alt="162 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -209,13 +209,21 @@ Nothing at all, when it is working — which is the point. The evidence is in
 ```
 [01:05:10] SENT[hook] Terminal:44939:1 | /dev/ttys000 | MarketingResearch — … | retry #1
 [01:22:47] ticket held | /dev/ttys000 | stood down at the last moment: session busy (Retrying in Ns)
-[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | OK
+[12:03:05] CLEARED a stalled 'please, continue' from the input box | Terminal:45611:1 | /dev/ttys005 | OK
+[01:31:36] ticket held | /dev/ttys004 | ok: input box not empty (continue), skipping; unchanged for 92s of the 120s grace
+[01:32:04] CLEARED an abandoned 'continue' from the input box | Terminal:118693:1 | /dev/ttys004 | OK
 ```
 
 Line one is a rescue, one second after the drop. Line two is the watchdog
 *refusing* to type, because that session had started recovering on its own and
 interrupting it would have cost the turn. Line three is it repairing an earlier
 injection of its own that never made it out of the input box.
+
+Lines four and five are the same repair for text that was not ours: the box had
+been holding `continue` since before the stream died, the grace ran out with
+nobody touching it, and it was cleared so the next sweep could rescue the
+session. The text is quoted in the log on purpose — that is how you get a queued
+message back if one is ever cleared out from under you.
 
 ---
 
@@ -285,7 +293,10 @@ Either way it refuses to act unless **all** of these hold:
   so (hook);
 - the session is idle — no spinner, no `esc to interrupt`, and crucially no
   built-in `Retrying in Ns · attempt n/m`, so it never interrupts self-recovery;
-- the input box is empty, so half-typed text is never clobbered;
+- the input box is empty, so half-typed text is never clobbered — the one
+  exception is text a ticket proves was left there before the drop and
+  abandoned since, which is [cleared rather than typed
+  over](#when-the-box-holds-somebody-elses-leftover);
 - a claude process is actually running there;
 - cooldown elapsed (30s) and the per-session retry cap (6) is not exhausted;
 - and all of it still holds at the instant of typing. The one tab is re-read
@@ -324,12 +335,40 @@ starts with or contains the retry prompt is theirs, and is never touched.
 Pressing return again — the obvious alternative — does not submit a box in this
 state; that was tried against a live session before Ctrl-U was.
 
-Three suites pin all of this. Run them after changing any pattern:
+### When the box holds somebody else's leftover
+
+Equality covers our own text and nothing else, and the same shield goes up
+behind *any* stray line. A real drop went unrescued on 2026-09-06 with the box
+holding the word `continue`: the ticket arrived on time, the watchdog held for
+the right reason, and three minutes later the ticket expired.
+
+Nothing about the *text* separates a leftover from a message queued while Claude
+was working, so the judgement is made on time alone, and only with a ticket in
+hand:
+
+* the text was **already in the box when the stream died** — so it is not a
+  reply the user is typing to the error they just watched appear; and
+* it has **not changed in `stale_box_grace_sec` since the drop** — so nobody is
+  at the keyboard. A queued message has an author who reacts to a dead session
+  within a minute or two. Any edit at all, however small, restarts that clock.
+
+Then it is cleared with Ctrl-U, once, and the next sweep injects normally. The
+text goes into the log on its way out, so a queued message clipped by mistake
+can be read back and re-sent — and setting `stale_box_grace_sec` to `0` turns
+the whole behaviour off, leaving only the exact-equality case above.
+
+The trade is deliberate and it is not free: a message you queued and walked away
+from for two minutes can be discarded in favour of the retry. Weigh that against
+the alternative, which is the session sitting parked until you happen to look at
+it.
+
+Four suites pin all of this. Run them after changing any pattern:
 
 ```bash
-python3 tests/test_analyze.py    # 44 hand-reproduced terminal layouts
-python3 tests/test_messages.py   # 25 real CLI strings, fire vs must-not-fire
-python3 tests/test_tickets.py    # 17 cases on claiming a background job's ticket
+python3 tests/test_analyze.py       # 44 hand-reproduced terminal layouts
+python3 tests/test_messages.py      # 25 real CLI strings, fire vs must-not-fire
+python3 tests/test_tickets.py       # 17 cases on claiming a background job's ticket
+python3 tests/test_abandoned_box.py # 45 cases on clearing a box, and on not clearing it
 ```
 
 Over half of the cases in each are "must not fire" — that is the side where a
@@ -366,6 +405,7 @@ adds; automating it just makes it happen more often. Set
 | `use_hook_triggers` | `true` | trust tickets from the StopFailure hook |
 | `trigger_ttl_sec` | `180` | tickets older than this are discarded |
 | `fast_poll_sec` | `1` | cadence while a ticket is pending |
+| `stale_box_grace_sec` | `120` | how long text must sit in the input box, unchanged, after a drop before it counts as abandoned and is cleared — see [When the box holds somebody else's leftover](#when-the-box-holds-somebody-elses-leftover). `0` disables it. Must be comfortably under `trigger_ttl_sec`, or every ticket expires first; the log warns once if it is not |
 | `exclude_title_regex` | `""` | skip sessions whose title matches |
 | `exclude_tty` | `[]` | e.g. `["/dev/ttys003"]` |
 | `watch_terminal_app` / `watch_iterm` / `watch_tmux` | `true` | per-backend switches |

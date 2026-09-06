@@ -29,7 +29,9 @@ Refuses to act unless ALL of these hold:
     hook ticket says so (hook path);
   * the session is idle -- no spinner, no `esc to interrupt`, and crucially no
     built-in `Retrying in Ns - attempt n/m` (never interrupt its own recovery);
-  * the input box is empty, so half-typed text is never clobbered;
+  * the input box is empty, so half-typed text is never clobbered -- text a
+    ticket proves was left there before the drop and abandoned since is the
+    one exception, and it is cleared rather than typed over;
   * a claude process is actually running there;
   * cooldown has elapsed and the per-session retry cap is not exhausted.
 """
@@ -80,6 +82,10 @@ DEFAULTS = {
     "use_hook_triggers": True,   # trust tickets left by the StopFailure hook
     "trigger_ttl_sec": 180,      # tickets older than this are discarded
     "fast_poll_sec": 1,          # poll interval while a ticket is pending
+    "stale_box_grace_sec": 120,  # a ticket's box text must outlast the drop by
+                                 # this long before it counts as abandoned;
+                                 # 0 disables clearing anything but our own
+                                 # stalled injection
     "snapshot": True,            # write sessions.json after every sweep (read by cc-needs-you)
 }
 
@@ -195,6 +201,18 @@ def log(msg):
     except Exception:
         pass
     print("[%s] %s" % (now(), msg), flush=True)
+
+
+_WARNED = set()
+
+
+def warn_once(msg):
+    """A misconfiguration worth naming, said once. The main loop re-reads the
+    config every sweep, so an unguarded warning would be a line per second."""
+    if msg in _WARNED:
+        return
+    _WARNED.add(msg)
+    log("WARN %s" % msg)
 
 
 def load_json(path, default):
@@ -800,6 +818,71 @@ def is_stalled_injection(screen, tail_lines, retry_text):
     return body is not None and body == (retry_text or "").strip()
 
 
+# How each kind of clearable text is worded, as (adjective for the log, noun for
+# the verdict, bare noun for the cooling-down verdict). Both the log line and the
+# verdicts are read back by hand and by session_state(), so they live here rather
+# than being built at the call site.
+STALLED_TEXT = ("a stalled", "a stalled injection", "stalled injection")
+ABANDONED_TEXT = ("an abandoned", "an abandoned message", "abandoned message")
+
+
+def track_input_box(st, body, now):
+    """Remember what the box holds and since when. Called once per sweep.
+
+    `box_since` is the first sighting of *this* text: any edit, however small,
+    restarts it. That is the whole signal abandoned_box() rests on, so it has to
+    be sampled on every session the sweep evaluates, not only the stuck ones.
+    """
+    # Membership, not `!=`: a session first seen with no box at all has to be
+    # recorded as sampled, or "no box" and "never looked" stay the same state.
+    if "box_text" not in st or body != st["box_text"]:
+        st["box_text"] = body
+        st["box_since"] = now
+        st.pop("cleared_box", None)      # different text: it may be clearable
+
+
+def abandoned_box(st, trig, grace_sec, now):
+    """Has the text in the input box been left behind rather than half-typed?
+
+    Only ever true with a ticket in hand, and only on two facts about *time*,
+    because nothing about the text itself can tell the two cases apart:
+
+      * it was already in the box when the stream died -- so it is not a reply
+        the user is typing to the error they just watched appear, and
+      * it has not changed in `grace_sec` since the drop -- so nobody is at the
+        keyboard. A queued message has an author who reacts to a dead session
+        within a minute or two; text that outlasts the drop untouched does not.
+
+    The cost of being wrong is bounded and the log carries the text away with
+    it, so a queued message can be read back and re-sent. The cost of never
+    clearing is a session parked until a human happens to look at it -- which is
+    the thing this watchdog exists to prevent.
+
+    Returns (True, "") or (False, why not), the reason worded for the log.
+    """
+    if grace_sec <= 0:
+        return False, "abandoned-box clearing disabled"
+    if not trig:
+        return False, "no ticket, so no drop time to measure against"
+    try:
+        drop_ts = float(trig.get("ts") or 0)
+    except (TypeError, ValueError):
+        drop_ts = 0
+    if drop_ts <= 0:
+        return False, "ticket carries no drop time"
+    since = st.get("box_since")
+    if since is None:
+        return False, "box never sampled before now"
+    if since > drop_ts:
+        return False, "typed after the drop -- theirs"
+    waited = now - drop_ts
+    if waited < grace_sec:
+        return False, "unchanged for %ds of the %ds grace" % (int(waited), int(grace_sec))
+    if st.get("cleared_box") == st.get("box_text"):
+        return False, "already cleared this text and it stayed"
+    return True, ""
+
+
 def clear_input_box(sess):
     """Send Ctrl-U to this session. Returns (ok, detail)."""
     app = sess["app"]
@@ -883,6 +966,14 @@ def scan_once(cfg, state, act=True):
     live = claude_ttys()
     excl_re = re.compile(cfg["exclude_title_regex"]) if cfg.get("exclude_title_regex") else None
     triggers = read_triggers(cfg["trigger_ttl_sec"]) if cfg.get("use_hook_triggers", True) else {}
+    # The grace runs inside the ticket's lifetime: a grace that outlasts the TTL
+    # means every ticket expires before the box can be judged abandoned, and the
+    # feature is off without ever saying so. Not clamped -- a clamp would fire
+    # far sooner than the number that was actually configured.
+    if 0 < cfg.get("stale_box_grace_sec", 0) >= cfg["trigger_ttl_sec"] - 10:
+        warn_once("stale_box_grace_sec=%ds leaves no room inside trigger_ttl_sec=%ds"
+                  " -- abandoned input-box text will never be cleared"
+                  % (cfg["stale_box_grace_sec"], cfg["trigger_ttl_sec"]))
     ticket_alias = rehome_daemon_tickets(triggers, sessions) if triggers else {}
     report = []
     seen_keys = set()
@@ -910,6 +1001,7 @@ def scan_once(cfg, state, act=True):
             continue
 
         trig = triggers.get(s["tty"])
+        track_input_box(st, input_box(s["screen"], cfg["tail_lines"]), time.time())
         # A ticket means StopFailure already confirmed this turn died, so the
         # error need not be on screen and the debounce is unnecessary. Idle and
         # empty-input-box guards still apply.
@@ -925,23 +1017,49 @@ def scan_once(cfg, state, act=True):
                 # When a drop goes unrescued this line is the only thing that
                 # can say the ticket arrived and what the screen looked like.
                 log("ticket voided | %s | %s" % (s["tty"], reason))
-            # An injection of ours that stalled in the input box blocks every
-            # later rescue of this session, including this one. Clear it and let
-            # the next sweep act; the ticket is deliberately left pending.
-            elif (reason.startswith("input box not empty")
-                    and (trig or ERR_TEXT.search(_norm(s["screen"])))
-                    and is_stalled_injection(s["screen"], cfg["tail_lines"], cfg["retry_text"])):
-                if not act or cfg["dry_run"] or os.path.exists(PAUSE_FLAG):
-                    reason += "; would clear a stalled injection"
+            # Text in the input box shields this session from every later
+            # rescue, including this one. Two kinds are safe to take out of the
+            # way -- an injection of ours that stalled unsubmitted, and text a
+            # ticket proves was left behind before the drop and abandoned since.
+            # Everything else is the user's and stays. Either way the ticket is
+            # deliberately left pending, so the next sweep does the rescue.
+            elif reason.startswith("input box not empty"):
+                # (adjective, noun, bare noun) -- the log and the three verdict
+                # wordings for whichever kind of text this is, or None for text
+                # that must be left alone.
+                if ((trig or ERR_TEXT.search(_norm(s["screen"])))
+                        and is_stalled_injection(s["screen"], cfg["tail_lines"],
+                                                 cfg["retry_text"])):
+                    what, once, why = STALLED_TEXT, False, ""
+                else:
+                    left, why = abandoned_box(st, trig, cfg.get("stale_box_grace_sec", 0),
+                                              time.time())
+                    what, once = (ABANDONED_TEXT if left else None), True
+                if what is None:
+                    reason += "; " + why
+                elif not act or cfg["dry_run"] or os.path.exists(PAUSE_FLAG):
+                    reason += "; would clear %s" % what[1]
                 elif time.time() - st.get("last_clear", 0) < cfg["cooldown_sec"]:
-                    reason += "; stalled injection, clear cooling down"
+                    reason += "; %s, clear cooling down" % what[2]
                 else:
                     st["last_clear"] = time.time()
                     cleared, detail = clear_input_box(s)
-                    log("%s a stalled %r from the input box | %s | %s | %s"
-                        % ("CLEARED" if cleared else "FAILED to clear",
-                           cfg["retry_text"], sid, s["tty"], detail))
-                    reason += "; cleared a stalled injection" if cleared else "; clear failed"
+                    if once and cleared:
+                        # One delivered Ctrl-U per distinct text. If the keys
+                        # went out and the text is still there next sweep -- a
+                        # queued-message hint is not an editable line -- stop,
+                        # rather than keep typing at somebody's session every
+                        # cooldown until the ticket dies. A clear that failed to
+                        # go out at all is not an attempt and may be retried.
+                        # Our own stalled injection has no such limit: that text
+                        # is known to be ours and retrying it costs nothing.
+                        st["cleared_box"] = st.get("box_text")
+                    # The text goes into the log on its way out -- a queued
+                    # message cleared by mistake has to be readable back.
+                    log("%s %s %r from the input box | %s | %s | %s"
+                        % ("CLEARED" if cleared else "FAILED to clear", what[0],
+                           st.get("box_text"), sid, s["tty"], detail))
+                    reason += ("; cleared %s" % what[1]) if cleared else "; clear failed"
             report.append((sid, s["title"], "ok: %s" % reason))
             continue
 
