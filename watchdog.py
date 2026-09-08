@@ -434,12 +434,19 @@ def has_claude(sess, live_ttys):
 
 # ---------------------------------------------------------------- hook tickets
 
-# Why the last sweep declined to act, keyed by tty, so an expiring ticket can
-# say what it was waiting on. A ticket that dies without a word is
-# undiagnosable afterwards -- which is how one drop sat unrecovered for
-# eleven hours with nothing in the log but "expired".
+# Why the last sweep declined to act, keyed by tty, as (verdict, tab title), so
+# an expiring ticket can say what it was waiting on and which session it was.
+# A ticket that dies without a word is undiagnosable afterwards -- which is how
+# one drop sat unrecovered for eleven hours with nothing in the log but
+# "expired".
 _LAST_VERDICT = {}
 _TICKET_NOTES = {}
+
+# The verdict analyze() files when the box already holds typed text, read back
+# so an expiring ticket can quote what blocked it. Matching on the phrase is
+# how the sweep and the snapshot already recognise this state; this only pulls
+# the draft itself back out of it.
+DRAFT_VERDICT = re.compile(r"input box not empty \((.*)\), skipping")
 
 
 def ticket_note(path, tty, note):
@@ -452,7 +459,36 @@ def ticket_note(path, tty, note):
         del _TICKET_NOTES[stale]
 
 
-def read_triggers(ttl_sec):
+def announce_expiry(rec, verdict, title):
+    """Tell the user about a rescue that was abandoned and is theirs to finish.
+
+    Most expiries need no banner: the session recovered on its own, or the turn
+    moved on, or the tab is gone and there is nothing to type into anyway. One
+    does. A ticket held because the input box already had typed text in it was
+    a drop the watchdog could have cleared and deliberately did not, because
+    injecting would have submitted `retry_text` glued onto the user's own
+    half-written line. Until now that decision was correct and completely
+    silent: the ticket held for its whole TTL and vanished, and the only trace
+    was a log line nobody reads. The session then sits parked forever, because
+    the draft that blocked this rescue blocks every later one too -- and the
+    fix is two seconds of the user's time, if they are told.
+
+    Deliberately not gated on act/dry_run/PAUSE: this reports a fact rather
+    than taking an action, and a paused watchdog is exactly when knowing that
+    a drop went unrescued matters most.
+    """
+    draft = DRAFT_VERDICT.search(verdict or "")
+    if not draft:
+        return False
+    where = (title or "").strip() or rec.get("tty") or "a Claude Code session"
+    notify("Claude Code drop left unrescued",
+           "%s\nyour draft is blocking the retry: %s" % (where[:60], draft.group(1)))
+    log("NOTIFIED drop left unrescued | %s | draft in the box: %s"
+        % (where, draft.group(1)))
+    return True
+
+
+def read_triggers(ttl_sec, warn=True):
     """Collect tickets left by the StopFailure hook, keyed by tty.
 
     A ticket means the drop is a known fact rather than something inferred from
@@ -473,8 +509,11 @@ def read_triggers(ttl_sec):
             _drop(path)
             continue
         if stamp - float(rec.get("ts") or 0) > ttl_sec:
+            verdict, title = _LAST_VERDICT.get(rec.get("tty"), ("never evaluated", ""))
             log("ticket expired, discarded | %s | %s | last verdict: %s"
-                % (rec.get("tty"), name, _LAST_VERDICT.get(rec.get("tty"), "never evaluated")))
+                % (rec.get("tty"), name, verdict))
+            if warn:
+                announce_expiry(rec, verdict, title)
             _drop(path)
             continue
         rec["_path"] = path
@@ -882,7 +921,8 @@ def scan_once(cfg, state, act=True):
     sessions = collect_sessions(cfg)
     live = claude_ttys()
     excl_re = re.compile(cfg["exclude_title_regex"]) if cfg.get("exclude_title_regex") else None
-    triggers = read_triggers(cfg["trigger_ttl_sec"]) if cfg.get("use_hook_triggers", True) else {}
+    triggers = (read_triggers(cfg["trigger_ttl_sec"], cfg.get("notify", True))
+                if cfg.get("use_hook_triggers", True) else {})
     ticket_alias = rehome_daemon_tickets(triggers, sessions) if triggers else {}
     report = []
     seen_keys = set()
@@ -1002,10 +1042,12 @@ def scan_once(cfg, state, act=True):
     # A pending ticket that is not acted on must say why, every time the
     # reason changes. Silence here is what makes a missed drop unexplainable.
     verdicts = {}
-    for row_sid, _row_title, row_msg in report:
+    for row_sid, row_title, row_msg in report:
         row_tty = tty_by_sid.get(row_sid)
         if row_tty:
-            verdicts[row_tty] = row_msg
+            verdicts[row_tty] = (row_msg, row_title)
+    # A rehomed ticket expires under the tty it was written with, so file the
+    # tab's verdict -- and its title -- under the daemon pty as well.
     for pty, tab in ticket_alias.items():
         if tab in verdicts:
             verdicts[pty] = verdicts[tab]
@@ -1014,7 +1056,8 @@ def scan_once(cfg, state, act=True):
     for trig_tty, trig_rec in triggers.items():
         if not os.path.exists(trig_rec["_path"]):
             continue                    # consumed or voided this sweep
-        msg = verdicts.get(trig_tty) or unclaimed_note(trig_rec)
+        filed = verdicts.get(trig_tty)
+        msg = filed[0] if filed else unclaimed_note(trig_rec)
         ticket_note(trig_rec["_path"], trig_tty, msg)
 
     for k in list(state.keys()):

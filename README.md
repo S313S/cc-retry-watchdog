@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
+  <img src="https://img.shields.io/badge/tests-127%20cases%20%C2%B7%20half%20must--not--fire-green" alt="127 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -362,7 +362,7 @@ adds; automating it just makes it happen more often. Set
 | `cooldown_sec` | `30` | minimum gap between injections into one session |
 | `max_consecutive` | `6` | per-session retry cap; then it stops and waits for a human |
 | `dry_run` | `false` | log what it would do, inject nothing |
-| `notify` | `true` | desktop notification on injection (macOS) |
+| `notify` | `true` | desktop notification on injection, and when a draft in the input box left a drop unrescued (macOS) |
 | `use_hook_triggers` | `true` | trust tickets from the StopFailure hook |
 | `trigger_ttl_sec` | `180` | tickets older than this are discarded |
 | `fast_poll_sec` | `1` | cadence while a ticket is pending |
@@ -414,6 +414,16 @@ Things that cost real debugging time, recorded so nobody repeats them:
   reason changes, and the expiry line repeats the last verdict. Before that, a
   missed drop left nothing in the log but `expired`, and no way to tell whether
   the session had looked busy, unrecognized, or absent.
+- **One of those expiries has to reach the user, not just the log.** A ticket
+  held because the input box already had typed text in it is a drop this could
+  have cleared and deliberately did not — injecting would have submitted
+  `retry_text` glued onto a half-written line. That judgement is right, and it
+  used to be completely silent: the ticket held for its whole TTL and vanished.
+  The session then stays parked forever, because the same draft blocks every
+  later rescue too. So that one expiry raises a desktop notification naming the
+  session and quoting the draft (`NOTIFIED drop left unrescued` in the log) —
+  the fix is two seconds of your time, once you know. Every other expiry is
+  either benign or nothing you could act on, and stays in the log.
 - **Terminal.app's scripting dictionary fails silently, twice.**
   `repeat with w in windows` yields nothing — you must index `window wi`. And
   `set tb to tab ti of window wi` followed by `contents of tb` returns empty —

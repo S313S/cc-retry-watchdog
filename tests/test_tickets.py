@@ -20,10 +20,12 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import watchdog  # noqa: E402
-from watchdog import (job_for_session, rehome_daemon_tickets,  # noqa: E402
+from watchdog import (announce_expiry, job_for_session,  # noqa: E402
+                      read_triggers, rehome_daemon_tickets,
                       session_showing_job, unclaimed_note)
 
 SID = "e4d6eb49-bdb1-4412-a679-3db04d9fa147"
@@ -42,6 +44,8 @@ ELSEWHERE = {"app": "Terminal", "key": "108008:1", "tty": "/dev/ttys011",
              "title": u"cc-retry-watchdog — ◐ auto-send please logic — claude — 145×33"}
 
 RESULTS = []
+# Banners the code tried to put on screen, captured instead of shown.
+BANNERS = []
 
 
 def check(name, expect, got):
@@ -56,6 +60,7 @@ def main():
     root = tempfile.mkdtemp(prefix="ccw-jobs-")
     saved, watchdog.JOBS_DIR = watchdog.JOBS_DIR, root
     quiet, watchdog.log = watchdog.log, lambda *_a, **_k: None
+    shown, watchdog.notify = watchdog.notify, lambda t, m: BANNERS.append((t, m))
     try:
         os.makedirs(os.path.join(root, SID[:8]))
         with open(os.path.join(root, SID[:8], "state.json"), "w") as f:
@@ -119,8 +124,74 @@ def main():
         check("a ticket with no job behind it still reads plainly",
               "no terminal session reports this tty",
               unclaimed_note({"tty": "/dev/ttys009", "session_id": None}))
+
+        # ------------------------------------------- expiring with a reason
+        # A ticket held because the user had half a line typed in the box is
+        # the one expiry worth interrupting them over: the watchdog could have
+        # rescued the session and correctly refused, the same draft will block
+        # every later rescue too, and clearing it takes two seconds. Every
+        # other expiry is either benign or nothing the user can act on, so it
+        # stays in the log where it belongs.
+        DRAFT = u"ok: input box not empty (批准挪到 2524，做吧), skipping"
+        TITLE = u"MarketingResearch — ✳ Owli SHARD-1 正式稿分片 — claude — 145×32"
+
+        check("a draft-blocked expiry is announced",
+              True, announce_expiry({"tty": "/dev/ttys007"}, DRAFT, TITLE))
+        check("and the banner quotes the draft that blocked it",
+              True, u"批准挪到 2524，做吧" in BANNERS[-1][1])
+        check("and names the session it belongs to",
+              True, u"Owli SHARD-1 正式稿分片" in BANNERS[-1][1])
+        # No tab title survived the sweep: the tty is still better than nothing.
+        announce_expiry({"tty": "/dev/ttys007"}, DRAFT, "")
+        check("with no title it falls back to the tty",
+              True, "/dev/ttys007" in BANNERS[-1][1])
+
+        for quiet_verdict in ("ok: output after the error (done) -- turn moved on",
+                              "ok: recap after the error -- turn ended normally",
+                              "never evaluated", ""):
+            check("stays quiet on %r" % quiet_verdict[:34],
+                  False, announce_expiry({"tty": "/dev/ttys007"}, quiet_verdict, TITLE))
+
+        # ------------------------------------- the whole path through a file
+        trig_dir = tempfile.mkdtemp(prefix="ccw-trig-")
+        saved_trig, watchdog.TRIG_DIR = watchdog.TRIG_DIR, trig_dir
+        try:
+            def write_ticket(name, age):
+                with open(os.path.join(trig_dir, name), "w") as fh:
+                    json.dump({"tty": "/dev/ttys007", "session_id": SID,
+                               "ts": time.time() - age}, fh)
+
+            watchdog._LAST_VERDICT.clear()
+            watchdog._LAST_VERDICT["/dev/ttys007"] = (DRAFT, TITLE)
+
+            del BANNERS[:]
+            write_ticket("expired.json", 400)
+            check("an expired ticket is not handed to the sweep",
+                  {}, read_triggers(180))
+            check("it is deleted from disk", False,
+                  os.path.exists(os.path.join(trig_dir, "expired.json")))
+            check("and the user hears about it once", 1, len(BANNERS))
+
+            # notify=false in the config must silence this the way it silences
+            # the rescue banner -- the log line is still written either way.
+            del BANNERS[:]
+            write_ticket("expired2.json", 400)
+            read_triggers(180, warn=False)
+            check("notifications off means no banner", 0, len(BANNERS))
+
+            # Still inside its TTL: nothing to announce, nothing to delete.
+            del BANNERS[:]
+            write_ticket("fresh.json", 5)
+            check("a live ticket is handed to the sweep",
+                  ["/dev/ttys007"], sorted(read_triggers(180)))
+            check("and is left on disk", True,
+                  os.path.exists(os.path.join(trig_dir, "fresh.json")))
+            check("and says nothing", 0, len(BANNERS))
+        finally:
+            watchdog.TRIG_DIR = saved_trig
+            shutil.rmtree(trig_dir, ignore_errors=True)
     finally:
-        watchdog.JOBS_DIR, watchdog.log = saved, quiet
+        watchdog.JOBS_DIR, watchdog.log, watchdog.notify = saved, quiet, shown
         shutil.rmtree(root, ignore_errors=True)
 
     ok = fail = 0

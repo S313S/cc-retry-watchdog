@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-Terminal.app%20%C2%B7%20iTerm2-black" alt="macOS">
   <img src="https://img.shields.io/badge/tmux-any%20platform-black" alt="tmux">
   <img src="https://img.shields.io/badge/python-3.6%2B%20%C2%B7%20stdlib%20only-blue" alt="Python 3.6+, stdlib only">
-  <img src="https://img.shields.io/badge/tests-112%20cases%20%C2%B7%20half%20must--not--fire-green" alt="112 test cases">
+  <img src="https://img.shields.io/badge/tests-127%20cases%20%C2%B7%20half%20must--not--fire-green" alt="127 test cases">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -318,7 +318,7 @@ python3 tests/test_tickets.py    # 17 条后台任务工单认领用例
 | `cooldown_sec` | `30` | 同一会话两次注入的最小间隔 |
 | `max_consecutive` | `6` | 单会话连续重试上限，超了就停手等人 |
 | `dry_run` | `false` | 只记录不注入 |
-| `notify` | `true` | 注入时弹桌面通知（macOS） |
+| `notify` | `true` | 注入时弹桌面通知；以及输入框里的草稿导致一次掉线没救成时也弹（macOS） |
 | `use_hook_triggers` | `true` | 是否采信钩子工单 |
 | `trigger_ttl_sec` | `180` | 工单多久算过期 |
 | `fast_poll_sec` | `1` | 有工单待处理时的间隔 |
@@ -363,6 +363,13 @@ watchdog 是那个本来就要读遍所有终端的进程，所以每次扫描�
   （`ticket held | <tty> | <原因>`），过期那行也会带上最后一次判定。在此之前，
   漏掉一次掉线在日志里只留下 `expired`，根本分不清当时是判成忙、没认出版面、
   还是压根没枚举到那个会话。
+- **其中有一种过期，光写日志不够，得让人知道。** 因为「输入框里有你打了一半的字」
+  而被拦下的 ticket，是本来能救、而它主动选择不救的一次——真注入就会把
+  `retry_text` 接在你那半句后面一起发出去。这个判断是对的，但它以前完全无声：
+  ticket 一直 hold 到 TTL 满，然后消失。会话从此永远停在那儿，因为挡住这次救援的
+  草稿，同样会挡住之后每一次。所以这一种过期会弹一条桌面通知，写清是哪个会话、
+  挡住它的草稿是什么（日志里对应 `NOTIFIED drop left unrescued`）——你只要知道了，
+  两秒钟就能解决。其余的过期要么无害、要么你也做不了什么，仍然只留在日志里。
 - **Terminal.app 的脚本字典有两个静默失败点。** `repeat with w in windows` 取不到东西，
   必须用 `window wi` 下标；`set tb to tab ti of window wi` 之后取 `contents of tb`
   返回空，必须每次写完整限定符。AppleScript 的 `try` 会把这两个都吞掉，
