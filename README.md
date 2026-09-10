@@ -364,7 +364,7 @@ adds; automating it just makes it happen more often. Set
 | `dry_run` | `false` | log what it would do, inject nothing |
 | `notify` | `true` | desktop notification on injection (macOS) |
 | `use_hook_triggers` | `true` | trust tickets from the StopFailure hook |
-| `trigger_ttl_sec` | `180` | tickets older than this are discarded |
+| `trigger_ttl_sec` | `180` | tickets older than this are discarded -- except while the only thing blocking the rescue is a draft in the input box, which buys the ticket 20x longer |
 | `fast_poll_sec` | `1` | cadence while a ticket is pending |
 | `exclude_title_regex` | `""` | skip sessions whose title matches |
 | `exclude_tty` | `[]` | e.g. `["/dev/ttys003"]` |

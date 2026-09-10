@@ -248,6 +248,44 @@ case("parked: backgrounded-agent receipt under the error", True, u"""\
 {status}""".format(box=BOX, status=STATUS))
 
 
+# A recap is drawn because nobody has typed for a while, which is exactly what
+# a drop leaves behind -- so it says nothing about whether the turn closed
+# cleanly. Reading it as a tombstone blinded the polling path to precisely the
+# drops that had sat longest: one tab was reported
+# `ok: recap after the error -- turn ended normally` while it sat parked on an
+# unrescued drop and a human typed the retry in by hand.
+case("parked: a recap was drawn over the drop", True, u"""\
+● Monitor event: "repeatability trial results"
+
+● That's the last stale monitor expiring -- its subject finished and was
+  reported in full, so there's nothing to re-arm.
+
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✳ Baked for 10s · done 18:09
+
+※ recap: Goal was rerunning QUOTE-1's coding to deliver a before/after table;
+  it's blocked because the proxy node keeps cutting the engine's connection
+  (production batch: 0 of 17 sessions). Next: you switch that node, then I
+  replay the comparison run. (disable recaps in /config)
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+# The recap's prose is model-written and summarizes the session, not the last
+# turn: it can say the task is done while the turn that said so was cut off
+# mid-sentence. Only the structure above it is evidence.
+case("parked: recap text claims the task is complete", True, u"""\
+● API Error: Connection closed mid-response. The response above may be incomplete.
+* Churned for 8s
+※ recap: task complete. (disable recaps in /config)
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
+
 # ---------------------------------------------------------------- must NOT fire
 
 # The mirror image of the four above: the main loop is the one drawing again, so
@@ -315,10 +353,18 @@ case("already recovered and kept writing", False, u"""\
 {box}
 {status}""".format(box=BOX, status=STATUS))
 
-case("recap after the error means the turn closed cleanly", False, u"""\
+# The guard that replaced the recap rule: a turn that really moved on leaves
+# the echoed user message and its reply *above* the recap, and those still
+# disqualify it. This is the case the old rule was reaching for.
+case("recovered, ran another turn, then a recap", False, u"""\
 ● API Error: Connection closed mid-response. The response above may be incomplete.
-* Churned for 8s
-※ recap: task complete. (disable recaps in /config)
+
+❯ please, continue
+
+⏺ Right, continuing from where it cut off. Schema is in docs/design/.
+
+* Churned for 44s
+※ recap: schema drafted; next is the migration. (disable recaps in /config)
 {box}
 ❯
 {box}
@@ -523,7 +569,6 @@ STATE_CASES = [
     ("ok: input box not empty (please, continue), skipping; cleared a stalled injection", "typing"),
     ("ok: no such error this turn",                                  "idle"),
     ("ok: output after the error (Let me try) -- turn moved on",     "idle"),
-    ("ok: recap after the error -- turn ended normally",             "idle"),
     ("ok: no input box found -- probably not a Claude Code UI",      "not_claude_ui"),
     ("ok: blank screen",                                             "not_claude_ui"),
     ("ok: empty content area",                                       "not_claude_ui"),

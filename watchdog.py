@@ -145,9 +145,35 @@ RULE_LINE = re.compile(r"^\s*[─━═┄╌—_\-╭╮╰╯│\s]{6,}$")
 # line still disqualifies the turn the way it should.
 TITLED_RULE = re.compile(r"^\s*[─━═┄╌—]{10,}[^─━═┄╌—]{0,60}[─━═┄╌—]*\s*$")
 
+# Claude Code draws a recap -- a short "here is where we are, here is what is
+# next" summary -- in the chrome just above the input box:
+#
+#     ※ recap: Goal was rerunning QUOTE-1's coding to deliver a before/after
+#       table; it's blocked because the proxy node keeps cutting the engine's
+#       connection. Next: you switch that node, then I replay the run.
+#       (disable recaps in /config)
+#
+# This used to *disqualify* a turn, on the reading that a recap means the turn
+# closed cleanly. It does not. The recap is drawn because nobody has typed for
+# a while -- which is exactly what a mid-response drop leaves behind. So the
+# rule fired hardest precisely when a rescue was most overdue: the longer a
+# drop sat unrescued, the more certain a recap was to appear and blind the
+# polling path to it permanently. One tab sat with
+# `verdict: recap after the error -- turn ended normally` while its drop went
+# unrescued and a human ended up typing the retry in by hand.
+#
+# A turn that really did move on is still caught by what it leaves *above* the
+# recap -- the echoed user message and the reply to it -- so the recap itself
+# is treated as what it is: chrome. Its wrapped continuation lines are plain
+# prose and would read as output, so analyze() swallows the whole block.
+RECAP_HEAD = re.compile(r"^\s*[※*·]?\s*recap:", re.I)
+RECAP_TAIL = re.compile(r"disable recaps in /config", re.I)
+
 # Decoration allowed to appear after the error. Anything else means the turn
 # moved on and must not be retried.
 CHROME_AFTER_ERR = [
+    RECAP_HEAD,
+    RECAP_TAIL,
     RULE_LINE,
     TITLED_RULE,
     # The turn-duration line. Claude Code renders it as
@@ -170,12 +196,6 @@ CHROME_AFTER_ERR = [
     re.compile(r"^\s*\S{0,2}\s*Waiting for \d+ background agents? to finish\s*$", re.I),
     re.compile(r"Backgrounded agent \(", re.I),
     re.compile(r'^\s*\S{0,2}\s*Agent\s+".*"\s+finished\b', re.I),
-]
-
-# If any of these follow the error, the turn actually finished normally.
-DISQUALIFY_AFTER_ERR = [
-    re.compile(r"^\s*[※*·]?\s*recap:", re.I),
-    re.compile(r"disable recaps in /config", re.I),
 ]
 
 
@@ -440,16 +460,45 @@ def has_claude(sess, live_ttys):
 # eleven hours with nothing in the log but "expired".
 _LAST_VERDICT = {}
 _TICKET_NOTES = {}
+_REHOME_NOTES = {}
+_LEASE_NOTES = {}
+
+# A ticket is discarded once it gets old. But "old" must not count time the
+# watchdog spent *deliberately holding it*. The one blocker that routinely
+# outlasts the TTL is a human draft in the input box: the watchdog refuses to
+# clobber it, and that refusal stands for as long as the draft is there -- yet
+# the draft clears itself the moment the human sends or erases it.
+#
+# A drop arrived at 18:09:37 with 切好了，跑 B 组 half-typed in the box. The
+# watchdog held, correctly, re-checked every four seconds for three minutes,
+# and then discarded the ticket -- not because the session had recovered, but
+# because the clock ran out. The drop was never rescued. A self-clearing
+# blocker is a reason to keep waiting, not a reason to give up.
+#
+# Waiting longer is only safe because a session that recovers on its own voids
+# its ticket the moment a sweep sees it busy, and because a ticket kept past
+# the normal TTL is demoted below: it stops being taken on faith.
+HOLD_REASONS = ("input box not empty",)
+HELD_TTL_MULT = 20               # 180s -> 1h before a held ticket is let go
+
+
+def _note_once(seen, path, msg):
+    """Log msg once per ticket, re-logging only when the message changes.
+
+    A held ticket is re-examined every second; without this the log fills with
+    thousands of identical lines and the events that matter drown in them.
+    """
+    if seen.get(path) == msg:
+        return
+    seen[path] = msg
+    log(msg)
+    for stale in [k for k in seen if k != path and not os.path.exists(k)]:
+        del seen[stale]
 
 
 def ticket_note(path, tty, note):
     """Log why a pending ticket is being held. Once per distinct reason."""
-    if _TICKET_NOTES.get(path) == note:
-        return
-    _TICKET_NOTES[path] = note
-    log("ticket held | %s | %s" % (tty, note))
-    for stale in [k for k in _TICKET_NOTES if not os.path.exists(k)]:
-        del _TICKET_NOTES[stale]
+    _note_once(_TICKET_NOTES, path, "ticket held | %s | %s" % (tty, note))
 
 
 def read_triggers(ttl_sec):
@@ -472,12 +521,25 @@ def read_triggers(ttl_sec):
         except Exception:
             _drop(path)
             continue
-        if stamp - float(rec.get("ts") or 0) > ttl_sec:
-            log("ticket expired, discarded | %s | %s | last verdict: %s"
-                % (rec.get("tty"), name, _LAST_VERDICT.get(rec.get("tty"), "never evaluated")))
+        age = stamp - float(rec.get("ts") or 0)
+        verdict = _LAST_VERDICT.get(rec.get("tty")) or ""
+        held = any(h in verdict for h in HOLD_REASONS)
+        if age > (ttl_sec * HELD_TTL_MULT if held else ttl_sec):
+            log("ticket expired, discarded | %s | %s | after %ds | last verdict: %s"
+                % (rec.get("tty"), name, age,
+                   _LAST_VERDICT.get(rec.get("tty"), "never evaluated")))
             _drop(path)
             continue
         rec["_path"] = path
+        # Past the normal TTL the session has had minutes to move on behind our
+        # back, so the ticket keeps its life but loses its privileges: the
+        # sweep debounces it like a screen-only sighting instead of acting on
+        # the first look.
+        rec["_extended"] = held and age > ttl_sec
+        if rec["_extended"]:
+            _note_once(_LEASE_NOTES, path,
+                       "ticket lease extended | %s | held %ds on: %s"
+                       % (rec.get("tty"), age, verdict))
         out[rec.get("tty")] = rec        # keep only the newest per tty
     return out
 
@@ -560,8 +622,9 @@ def rehome_daemon_tickets(triggers, sessions):
         triggers.pop(pty)
         triggers[target["tty"]] = rec
         alias[pty] = target["tty"]
-        log("ticket rehomed | %s -> %s | job %s | %s"
-            % (pty, target["tty"], rec["_via"], target["title"]))
+        _note_once(_REHOME_NOTES, rec["_path"],
+                   "ticket rehomed | %s -> %s | job %s | %s"
+                   % (pty, target["tty"], rec["_via"], target["title"]))
     return alias
 
 
@@ -650,17 +713,24 @@ def analyze(screen, tail_lines, require_error=True):
         nxt = content[err_end + 1]
         if not nxt.strip() or nxt[:1] not in (" ", "\t"):
             break
-        if any(p.search(nxt) for p in CHROME_AFTER_ERR + DISQUALIFY_AFTER_ERR):
+        if any(p.search(nxt) for p in CHROME_AFTER_ERR):
             break
         err_end += 1
 
-    # 5) only decoration may follow; real output or a recap means it moved on
-    for j in range(err_end + 1, len(content)):
+    # 5) only decoration may follow; real output means the turn moved on
+    j = err_end + 1
+    while j < len(content):
         line = content[j]
+        j += 1
         if not line.strip():
             continue
-        if any(p.search(line) for p in DISQUALIFY_AFTER_ERR):
-            return False, "recap after the error -- turn ended normally", ""
+        if RECAP_HEAD.search(line):
+            # A recap runs to several lines and the middle ones are ordinary
+            # prose; matched one line at a time they read as output and
+            # disqualify the very turn they are drawn over. Swallow the block.
+            while j < len(content) and content[j].strip() and content[j][:1] in (" ", "\t"):
+                j += 1
+            continue
         if any(p.search(line) for p in CHROME_AFTER_ERR):
             continue
         return False, "output after the error (%s) -- turn moved on" % _norm(line)[:40], ""
@@ -946,7 +1016,11 @@ def scan_once(cfg, state, act=True):
             continue
 
         st["streak"] = st.get("streak", 0) + 1
-        if not trig and st["streak"] < cfg["confirm_polls"]:
+        # A fresh ticket is authoritative and acted on at once. One kept alive
+        # past its TTL waited out a human draft to get here, so it is confirmed
+        # the slow way first -- a couple of seconds against a rescue that would
+        # otherwise have been thrown away entirely.
+        if (not trig or trig.get("_extended")) and st["streak"] < cfg["confirm_polls"]:
             report.append((sid, s["title"], "looks stuck (%d/%d confirmations)"
                            % (st["streak"], cfg["confirm_polls"])))
             continue
@@ -1044,7 +1118,9 @@ _STATE_RULES = (
     ("input box not empty",         "typing"),
     ("no such error this turn",     "idle"),           # turn over, waiting for a human
     ("output after the error",      "idle"),
-    ("recap after the error",       "idle"),
+    # "recap after the error" used to map here. Nothing emits it any more: a
+    # recap is chrome, and a session showing one over an unrescued drop is
+    # parked, not idle -- cc-needs-you should say so.
     ("retry cap",                    "gave_up"),        # parked, and we will not retry again
     ("no input box found",          "not_claude_ui"),
     ("blank screen",                "not_claude_ui"),
@@ -1107,6 +1183,19 @@ def main():
     if not os.path.exists(CONFIG_PATH):
         save_json(CONFIG_PATH, cfg)
 
+    # `watchdog.py --help` used to fall through to the daemon loop and start a
+    # second watchdog against live sessions. Anything not recognised stops here.
+    known = ("--once", "--check", "--daemon", "--help", "-h")
+    unknown = [a for a in args if a not in known]
+    if unknown or "--help" in args or "-h" in args:
+        print("cc-retry-watchdog -- resume Claude Code sessions killed "
+              "by a mid-stream drop")
+        print("\nusage: watchdog.py [--once | --check]\n")
+        print("  (no flags)  run the daemon: sweep forever and inject")
+        print("  --once      one sweep, injecting if a session qualifies")
+        print("  --check     one sweep, reporting only -- never types anything")
+        return 2 if unknown else 0
+
     if "--once" in args or "--check" in args:
         state = load_json(STATE_PATH, {})
         cfg["confirm_polls"] = 1       # a single sweep must be able to conclude
@@ -1149,4 +1238,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

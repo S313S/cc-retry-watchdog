@@ -320,7 +320,7 @@ python3 tests/test_tickets.py    # 17 条后台任务工单认领用例
 | `dry_run` | `false` | 只记录不注入 |
 | `notify` | `true` | 注入时弹桌面通知（macOS） |
 | `use_hook_triggers` | `true` | 是否采信钩子工单 |
-| `trigger_ttl_sec` | `180` | 工单多久算过期 |
+| `trigger_ttl_sec` | `180` | 工单多久算过期；但如果迟迟不动手只是因为输入框里还有你没发出去的草稿，工单会续租 20 倍时长 |
 | `fast_poll_sec` | `1` | 有工单待处理时的间隔 |
 | `exclude_title_regex` | `""` | 标题命中就跳过 |
 | `exclude_tty` | `[]` | 如 `["/dev/ttys003"]` |

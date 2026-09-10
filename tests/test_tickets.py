@@ -20,11 +20,13 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import watchdog  # noqa: E402
-from watchdog import (job_for_session, rehome_daemon_tickets,  # noqa: E402
-                      session_showing_job, unclaimed_note)
+from watchdog import (job_for_session, read_triggers,  # noqa: E402
+                      rehome_daemon_tickets, session_showing_job,
+                      unclaimed_note)
 
 SID = "e4d6eb49-bdb1-4412-a679-3db04d9fa147"
 JOB = {"sessionId": SID,
@@ -119,6 +121,61 @@ def main():
         check("a ticket with no job behind it still reads plainly",
               "no terminal session reports this tty",
               unclaimed_note({"tty": "/dev/ttys009", "session_id": None}))
+
+        # ------------------------------------------------ the lease on a held
+        # ticket. A drop arrived with a human's draft half-typed in the input
+        # box. The watchdog held -- correctly, it will not clobber a draft --
+        # re-checked every four seconds, and then discarded the ticket because
+        # three minutes had passed. The draft was the only thing in the way and
+        # it would have cleared itself the moment the human sent or erased it;
+        # the drop was never rescued and the retry was typed in by hand.
+        TTL = 180
+        HELD = u"ok: input box not empty (\u5207\u597d\u4e86\uff0c\u8dd1 B \u7ec4), skipping"
+        MOVED = "ok: no such error this turn"
+
+        for name, age, verdict, alive, extended in [
+            ("a fresh ticket is kept, and taken on faith", 10, "", True, False),
+            ("a ticket whose session moved on expires on time",
+             TTL + 20, MOVED, False, False),
+            ("a ticket never evaluated expires on time", TTL + 20, "", False, False),
+            ("a draft in the box keeps the ticket alive", TTL + 20, HELD, True, True),
+            ("the kept ticket is no longer taken on faith", TTL + 20, HELD, True, True),
+            ("a held ticket is still let go eventually",
+             TTL * 20 + 60, HELD, False, False),
+        ]:
+            trig_root = tempfile.mkdtemp(prefix="ccw-trig-")
+            saved_trig, watchdog.TRIG_DIR = watchdog.TRIG_DIR, trig_root
+            watchdog._LAST_VERDICT.clear()
+            watchdog._LEASE_NOTES.clear()
+            try:
+                tty = "/dev/ttys015"
+                path = os.path.join(trig_root, "t.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"tty": tty, "session_id": SID,
+                                        "ts": time.time() - age}))
+                if verdict:
+                    watchdog._LAST_VERDICT[tty] = verdict
+                got = read_triggers(TTL)
+                if "taken on faith" in name:
+                    check(name, extended, bool(got.get(tty, {}).get("_extended")))
+                else:
+                    check(name, alive, tty in got)
+                    check(name + " (file)", alive, os.path.exists(path))
+            finally:
+                watchdog.TRIG_DIR = saved_trig
+                shutil.rmtree(trig_root, ignore_errors=True)
+
+        # A held ticket is re-read every second. Rehoming it logged a line every
+        # time -- 46 identical lines in the three minutes of the incident, and
+        # with the longer lease it would have been nine hundred.
+        watchdog._REHOME_NOTES.clear()
+        lines = []
+        watchdog.log = lambda m: lines.append(m)
+        for _ in range(5):
+            trigs = {"/dev/ttys015": ticket()}
+            rehome_daemon_tickets(trigs, [TAB])
+        watchdog.log = lambda *_a, **_k: None
+        check("rehoming a held ticket logs once, not once per sweep", 1, len(lines))
     finally:
         watchdog.JOBS_DIR, watchdog.log = saved, quiet
         shutil.rmtree(root, ignore_errors=True)
