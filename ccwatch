@@ -23,6 +23,8 @@ LOG="$BASE/watchdog.log"
 CFG="$BASE/config.json"
 PAUSE="$BASE/PAUSED"
 PIDFILE="$BASE/watchdog.pid"
+AGENT_LABEL="com.cc-retry-watchdog.daemon"
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +41,10 @@ Usage: ccwatch <command>
   status      Daemon state and current config.
   log [n]     Tail the log (default 40 lines).
   hook        Is the StopFailure hook registered? Any pending tickets?
+  keepalive on|off
+              Have launchd start the watchdog at login and restart it if it
+              dies. Refuses to install until it has *proved* a launchd-started
+              process can drive your terminals -- see the macOS note below.
   pause       Stop injecting; keep the daemon running.
   resume      Undo pause.
   dry on|off  Toggle dry-run (log what it would do, inject nothing).
@@ -46,8 +52,14 @@ Usage: ccwatch <command>
 
 macOS note: run `start` from a real Terminal/iTerm window. Driving a terminal
 needs AppleScript automation rights, which are granted to the *responsible*
-app; a process spawned by launchd has no such identity and its AppleEvents
-hang. tmux-only setups are unaffected.
+app; a process spawned by launchd may have no such identity, in which case its
+AppleEvents are refused or hang. tmux-only setups are unaffected.
+
+That is why `keepalive on` runs the real AppleEvent first and installs nothing
+unless it comes back. The failure it is guarding against is not "the watchdog
+does not start" -- it is far worse: a watchdog that holds the pidfile, logs
+cheerful heartbeats, sees zero sessions and rescues nothing. Whether launchd
+has the right depends on the machine, so this is measured, never assumed.
 EOF
 }
 
@@ -143,6 +155,90 @@ PYEOF
     ;;
 
   log)     tail -n "${2:-40}" "$LOG" 2>/dev/null || echo "(no log yet)" ;;
+  # Run in the foreground so launchd's KeepAlive can supervise us.
+  agent-run)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then exit 0; fi
+    pgrep -f "$CODE_DIR/watchdog.py" >/dev/null 2>&1 && exit 0
+    if ! "$0" preflight >/dev/null 2>&1; then
+      echo "[$(date '+%F %T')] launchd agent stood down: cannot drive terminals from here" >> "$BASE/daemon.out.log"
+      exit 0        # exit 0, not non-zero: do not let launchd spin on this
+    fi
+    echo $$ > "$PIDFILE"
+    exec "$PY" "$CODE_DIR/watchdog.py"
+    ;;
+
+  # Can a process in *this* context actually drive the terminals? Asks the app
+  # the sweep will ask, and only one that is already running -- probing a
+  # stopped Terminal would launch it, which is not ours to do.
+  preflight)
+    [ "$(uname)" = "Darwin" ] || exit 0        # tmux path needs no automation rights
+    checked=0
+    for app in Terminal iTerm2; do
+      # Not pgrep -x: for a GUI app that matches the full executable path, not
+      # the name, so it never fires. Compare basenames instead -- and no
+      # AppleScript here, since a probe that needs its own permission to run
+      # cannot tell "not running" from "not permitted".
+      ps -Ao comm= | sed 's|.*/||' | grep -qx "$app" || continue
+      checked=1
+      osascript -e "tell application \"$app\" to return (count of windows)" >/dev/null 2>&1 || {
+        echo "cannot drive $app from here (AppleEvent refused)"; exit 1; }
+    done
+    [ "$checked" = 1 ] || echo "no terminal app running; nothing to prove against"
+    exit 0
+    ;;
+
+  keepalive)
+    case "${2:-}" in
+      on)
+        if ! "$0" preflight; then
+          echo "Refusing to install: a launchd-started process cannot drive your terminals here."
+          echo "It would hold the pidfile and rescue nothing. Use 'ccwatch autostart' in your shell rc instead."
+          exit 1
+        fi
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$AGENT_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$AGENT_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$CODE_DIR/ccwatch</string>
+        <string>agent-run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>$BASE/daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>$BASE/daemon.out.log</string>
+</dict>
+</plist>
+PLIST
+        launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+        "$0" stop >/dev/null 2>&1 || true
+        launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
+        echo "KeepAlive on. launchd starts it at login and restarts it if it dies."
+        echo "  plist: $AGENT_PLIST"
+        ;;
+      off)
+        launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+        rm -f "$AGENT_PLIST"
+        echo "KeepAlive off. The daemon is no longer supervised; 'ccwatch start' still works."
+        ;;
+      *)
+        if [ -f "$AGENT_PLIST" ]; then echo "KeepAlive: on  ($AGENT_PLIST)"; else echo "KeepAlive: off"; fi
+        echo "Usage: ccwatch keepalive on|off"
+        ;;
+    esac
+    ;;
+
   pause)   touch "$PAUSE"; echo "Injection paused." ;;
   resume)  rm -f "$PAUSE"; echo "Injection resumed." ;;
 

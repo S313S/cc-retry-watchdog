@@ -255,6 +255,25 @@ a healthy one needs.
 The daemon survives closing the window that started it. It does not survive a
 logout or reboot, which is exactly what the rc line covers.
 
+It also does not survive being killed — and that failure is silent. macOS
+jetsam took the daemon out under memory pressure one morning at 09:06; the log
+simply stops, no traceback, and the sessions went unwatched for ninety minutes
+until somebody happened to look. If you want launchd to bring it back:
+
+```bash
+ccwatch keepalive on      # restarts it if it dies, and starts it at login
+ccwatch keepalive off     # uninstall
+```
+
+This installs a LaunchAgent — but only after proving it can work. A process
+launchd starts may not hold AppleScript automation rights, and the failure mode
+is the worst kind: the watchdog holds the pidfile, logs cheerful heartbeats,
+sees zero sessions and rescues nothing. So `keepalive on` first sends the real
+AppleEvent to whichever terminal app is already running, and installs nothing
+if it comes back refused, telling you to use the rc line instead. `agent-run`
+repeats that check on every launch, and stands down rather than take the
+pidfile it cannot use.
+
 ---
 
 ## How it decides
