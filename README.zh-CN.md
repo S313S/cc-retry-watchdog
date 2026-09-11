@@ -346,8 +346,9 @@ watchdog 是那个本来就要读遍所有终端的进程，所以每次扫描�
 ]}
 ```
 
-`state` 取值：`working` · `idle`（这一轮结束了，在等人）· `typing`（输入框里有字）·
-`dropped`（停在掉线上，重试进行中）· `gave_up`（打到重试上限——需要人）·
+`state` 取值：`working` · `idle`（这一轮结束了，在等人）· `typing`（有人正在健康
+会话里打字）· `blocked`（这一轮已经死于掉线，输入框里留下的草稿是它没被救回的唯一
+原因——需要人）· `dropped`（停在掉线上，重试进行中）· `gave_up`（打到重试上限——需要人）·
 `skipped` · `not_claude_ui`。`since` 是进入当前状态的时间；`verdict` 是这次扫描给出的
 原话，和 `ccwatch check` 打印的一样。
 

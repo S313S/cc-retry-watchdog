@@ -393,8 +393,14 @@ each sweep it publishes what it saw to `~/.claude/cc-autoresume/sessions.json`
 ```
 
 `state` is one of `working` · `idle` (turn over, waiting for a human) · `typing`
-(input box not empty) · `dropped` (parked on a drop, retry in progress) ·
+(someone is composing in a healthy session) · `blocked` (the turn died on a drop
+and a draft left in the input box is the only reason it has not been rescued —
+needs a human) · `dropped` (parked on a drop, retry in progress) ·
 `gave_up` (retry cap hit — needs a human) · `skipped` · `not_claude_ui`.
+
+`blocked` used to be reported as `typing`, which reads as "you are on it" and
+made cc-needs-you suppress the notification — so the one state most in need of
+a human was the one guaranteed to stay quiet.
 `since` is when the session entered that state; `verdict` is the exact reason
 from the sweep, the same text `ccwatch check` prints.
 

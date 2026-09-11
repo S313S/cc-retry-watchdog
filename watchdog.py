@@ -995,6 +995,15 @@ def scan_once(cfg, state, act=True):
             if st["streak"] or st["consecutive"]:
                 st["streak"] = 0
                 st["consecutive"] = 0
+            # "input box not empty" covers two situations that could not be
+            # further apart: somebody is composing a message in a healthy
+            # session, and a session that died on a drop hours ago whose rescue
+            # is blocked by a draft nobody came back to. Both reported as
+            # `typing`, which cc-needs-you reads as "you are on it" and uses to
+            # *suppress* the notification -- so the one state most in need of a
+            # human was the one guaranteed to stay quiet. Say which it is.
+            blocked = bool(reason.startswith("input box not empty")
+                           and (trig or ERR_TEXT.search(_norm(s["screen"]))))
             if trig and "busy" in reason:
                 _drop(trig["_path"])       # it recovered on its own; void the ticket
                 reason += "; ticket voided"
@@ -1005,9 +1014,8 @@ def scan_once(cfg, state, act=True):
             # An injection of ours that stalled in the input box blocks every
             # later rescue of this session, including this one. Clear it and let
             # the next sweep act; the ticket is deliberately left pending.
-            elif (reason.startswith("input box not empty")
-                    and (trig or ERR_TEXT.search(_norm(s["screen"])))
-                    and is_stalled_injection(s["screen"], cfg["tail_lines"], cfg["retry_text"])):
+            elif blocked and is_stalled_injection(s["screen"], cfg["tail_lines"],
+                                                  cfg["retry_text"]):
                 if not act or cfg["dry_run"] or os.path.exists(PAUSE_FLAG):
                     reason += "; would clear a stalled injection"
                 elif time.time() - st.get("last_clear", 0) < cfg["cooldown_sec"]:
@@ -1019,6 +1027,8 @@ def scan_once(cfg, state, act=True):
                         % ("CLEARED" if cleared else "FAILED to clear",
                            cfg["retry_text"], sid, s["tty"], detail))
                     reason += "; cleared a stalled injection" if cleared else "; clear failed"
+            if blocked:
+                reason += "; the drop behind it is still unrescued"
             report.append((sid, s["title"], "ok: %s" % reason))
             continue
 
@@ -1122,6 +1132,9 @@ _STATE_RULES = (
     ("skipped",                     "skipped"),        # excluded, or no claude here
     ("session busy",                "working"),
     ("stood down",                  "working"),        # it moved between sweeps
+    ("still unrescued",             "blocked"),        # parked on a drop, and a
+                                                       # draft in the box is what
+                                                       # stops us rescuing it
     ("input box not empty",         "typing"),
     ("no such error this turn",     "idle"),           # turn over, waiting for a human
     ("output after the error",      "idle"),

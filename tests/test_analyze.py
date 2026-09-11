@@ -565,8 +565,21 @@ STATE_CASES = [
     ("ok: session busy (esc to interrupt)",                          "working"),
     ("ok: session busy (Retrying in\\s+\\d+s); ticket voided",       "working"),
     ("stood down at the last moment: session busy (esc to interrupt)", "working"),
+    # Someone is composing in a healthy session: leave them alone.
     ("ok: input box not empty (draft), skipping",                     "typing"),
-    ("ok: input box not empty (please, continue), skipping; cleared a stalled injection", "typing"),
+    # Same sentence, opposite meaning: the turn behind this box died on a drop
+    # and the draft is the only reason it has not been rescued. Reported as
+    # `typing` it read as "you are on it" and cc-needs-you suppressed the
+    # notification -- the state most in need of a human was the one guaranteed
+    # to stay quiet. One session sat like this from 00:16 until the next
+    # morning while its draft, `修 D-059，句级实体闸`, went stale in the box.
+    ("ok: input box not empty (修 D-059，句级实体闸), skipping; "
+     "the drop behind it is still unrescued",                         "blocked"),
+    ("ok: input box not empty (please, continue), skipping; cleared a stalled injection; "
+     "the drop behind it is still unrescued",                         "blocked"),
+    # A stalled injection we have not managed to clear is still blocked.
+    ("ok: input box not empty (please, continue), skipping; clear failed; "
+     "the drop behind it is still unrescued",                         "blocked"),
     ("ok: no such error this turn",                                  "idle"),
     ("ok: output after the error (Let me try) -- turn moved on",     "idle"),
     ("ok: no input box found -- probably not a Claude Code UI",      "not_claude_ui"),
