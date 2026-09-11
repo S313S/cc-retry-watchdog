@@ -265,14 +265,25 @@ ccwatch keepalive on      # restarts it if it dies, and starts it at login
 ccwatch keepalive off     # uninstall
 ```
 
-This installs a LaunchAgent — but only after proving it can work. A process
-launchd starts may not hold AppleScript automation rights, and the failure mode
-is the worst kind: the watchdog holds the pidfile, logs cheerful heartbeats,
-sees zero sessions and rescues nothing. So `keepalive on` first sends the real
-AppleEvent to whichever terminal app is already running, and installs nothing
-if it comes back refused, telling you to use the rc line instead. `agent-run`
-repeats that check on every launch, and stands down rather than take the
-pidfile it cannot use.
+This installs a LaunchAgent — but only after proving it can work, because two
+separate things can stop it, and both fail in ways worth refusing over.
+
+**Where the checkout lives.** macOS keeps launchd out of `~/Downloads`,
+`~/Desktop` and `~/Documents`. From a LaunchAgent, `ls` on a checkout in one of
+those succeeds while reading `watchdog.py` or exec'ing `ccwatch` returns
+`Operation not permitted` — so launchd respawns forever, logging two lines of
+that per attempt and watching nothing. If your checkout is there, `keepalive
+on` refuses and tells you: move it somewhere unprotected and re-run
+`install.sh`, or grant Full Disk Access to the interpreter launchd would use.
+The rc line above is unaffected — it runs as you, from your terminal.
+
+**Automation rights.** A process launchd starts may not hold AppleScript
+automation rights, and that failure is the worst kind: the watchdog holds the
+pidfile, logs cheerful heartbeats, sees zero sessions and rescues nothing. So
+`keepalive on` also sends the real AppleEvent to whichever terminal app is
+already running and installs nothing if it comes back refused. `agent-run`
+repeats both checks on every launch and stands down — without taking the
+pidfile — rather than run blind.
 
 ---
 

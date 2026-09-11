@@ -237,11 +237,21 @@ ccwatch keepalive on      # 死了就重启，登录时也自启
 ccwatch keepalive off     # 卸载
 ```
 
-它会装一个 LaunchAgent——但**先证明可行才装**。launchd 起的进程未必持有 AppleScript
-自动化权限，而那种失败是最坏的一类：守护占着 pidfile、心跳照打、却一个会话也看不见、
-一次也救不了。所以 `keepalive on` 会先对着当前已在运行的终端 app 发一次真实的
-AppleEvent，被拒就什么都不装，并叫你改用上面那行 rc。`agent-run` 每次启动都重做这个
-检查，宁可主动退下，也不占住一个它根本用不了的 pidfile。
+它会装一个 LaunchAgent——但**先证明可行才装**。有两件独立的事会让它跑不起来，
+而且两种失败都值得直接拒绝安装。
+
+**一、仓库放在哪。** macOS 不让 launchd 进 `~/Downloads`、`~/Desktop`、`~/Documents`。
+从 LaunchAgent 里看，对这类目录 `ls` 是通的，但读 `watchdog.py`、执行 `ccwatch` 都会
+返回 `Operation not permitted`——于是 launchd 永远重试，每次留下两行这个错误，却什么
+也没看守。仓库在这三个目录下时，`keepalive on` 会拒绝并告诉你：把仓库挪到不受保护的
+位置再跑一遍 `install.sh`，或者给 launchd 会用到的解释器授予完全磁盘访问权限。
+上面那行 rc 不受影响——它以你的身份、从你的终端启动。
+
+**二、自动化权限。** launchd 起的进程未必持有 AppleScript 自动化权限，而那种失败是最坏
+的一类：守护占着 pidfile、心跳照打、却一个会话也看不见、一次也救不了。所以
+`keepalive on` 还会对着当前已在运行的终端 app 发一次真实的 AppleEvent，被拒就什么都
+不装。`agent-run` 每次启动都重做这两项检查，宁可主动退下、也不占住一个它根本用不了的
+pidfile。
 
 ---
 

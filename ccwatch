@@ -172,6 +172,27 @@ PYEOF
   # stopped Terminal would launch it, which is not ours to do.
   preflight)
     [ "$(uname)" = "Darwin" ] || exit 0        # tmux path needs no automation rights
+
+    # First question, and the one that actually stopped this working: can a
+    # launchd process read our code at all? ~/Downloads, ~/Desktop and
+    # ~/Documents are TCC-protected, and an agent has no grant for them --
+    # measured, not guessed: from a LaunchAgent, `ls` on the checkout succeeds
+    # while `head watchdog.py` and exec'ing this script both come back
+    # "Operation not permitted". launchd then respawns forever, two lines of
+    # that error per attempt, watching nothing. Refuse early and say what to do.
+    case "$CODE_DIR/" in
+      "$HOME"/Downloads/*|"$HOME"/Desktop/*|"$HOME"/Documents/*)
+        echo "the checkout lives under a folder macOS keeps launchd out of:"
+        echo "  $CODE_DIR"
+        echo "launchd could not read watchdog.py or exec ccwatch there."
+        echo "Either move the checkout somewhere unprotected (~/Workspace, ~/src, ...)"
+        echo "and re-run install.sh, or grant Full Disk Access to the interpreter"
+        echo "launchd would use. Until then, the shell-rc 'ccwatch autostart' line"
+        echo "is the supported way to keep it running."
+        exit 1 ;;
+    esac
+
+    # Second question: can it drive the terminals once it is running?
     checked=0
     for app in Terminal iTerm2; do
       # Not pgrep -x: for a GUI app that matches the full executable path, not
@@ -191,8 +212,10 @@ PYEOF
     case "${2:-}" in
       on)
         if ! "$0" preflight; then
-          echo "Refusing to install: a launchd-started process cannot drive your terminals here."
-          echo "It would hold the pidfile and rescue nothing. Use 'ccwatch autostart' in your shell rc instead."
+          echo
+          echo "Refusing to install: launchd cannot run a working watchdog here."
+          echo "Installing anyway would leave it respawning forever, or holding the"
+          echo "pidfile while seeing nothing -- worse than no watchdog at all."
           exit 1
         fi
         mkdir -p "$HOME/Library/LaunchAgents"
