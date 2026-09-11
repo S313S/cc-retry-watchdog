@@ -537,9 +537,16 @@ def read_triggers(ttl_sec):
         # the first look.
         rec["_extended"] = held and age > ttl_sec
         if rec["_extended"]:
+            # The elapsed seconds belong in the expiry line, not this one. A
+            # held ticket is re-read every sweep, so a message carrying a value
+            # that changes every sweep never matches the previous one and
+            # _note_once cannot dedupe it: this single line wrote 1084 copies
+            # of itself during one hour-long hold. Keep it stable -- the ttl
+            # and the verdict both are, and a verdict that does change (the
+            # human edited their draft) is worth a fresh line anyway.
             _note_once(_LEASE_NOTES, path,
-                       "ticket lease extended | %s | held %ds on: %s"
-                       % (rec.get("tty"), age, verdict))
+                       "ticket lease extended | %s | past the %ds ttl, still held on: %s"
+                       % (rec.get("tty"), ttl_sec, verdict))
         out[rec.get("tty")] = rec        # keep only the newest per tty
     return out
 

@@ -176,6 +176,48 @@ def main():
             rehome_daemon_tickets(trigs, [TAB])
         watchdog.log = lambda *_a, **_k: None
         check("rehoming a held ticket logs once, not once per sweep", 1, len(lines))
+
+        # Same rule for the lease line, and it has to be checked against a
+        # *moving* clock. The first version of this line carried the elapsed
+        # seconds, so every sweep produced a message one second different from
+        # the last, nothing ever matched, and the dedupe it was written to use
+        # did nothing: 1084 copies in one hour-long hold. Calling read_triggers
+        # in a tight loop would not have caught it -- real time barely moves
+        # between calls and the seconds round to the same integer. Only an
+        # advancing clock reproduces it.
+        class Clock(object):
+            """time, but it moves three seconds per sweep, like the real one."""
+            def __init__(self, start):
+                self.now = start
+
+            def time(self):
+                self.now += 3
+                return self.now
+
+        trig_root = tempfile.mkdtemp(prefix="ccw-trig-")
+        saved_trig, watchdog.TRIG_DIR = watchdog.TRIG_DIR, trig_root
+        saved_time = watchdog.time
+        watchdog._LAST_VERDICT.clear()
+        watchdog._LEASE_NOTES.clear()
+        lines = []
+        watchdog.log = lambda m: lines.append(m)
+        try:
+            born = 1789000000.0
+            tty = "/dev/ttys015"
+            with open(os.path.join(trig_root, "t.json"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"tty": tty, "session_id": SID, "ts": born}))
+            watchdog._LAST_VERDICT[tty] = HELD
+            watchdog.time = Clock(born + TTL + 20)   # already past the ttl
+            for _ in range(20):
+                read_triggers(TTL)
+        finally:
+            watchdog.time = saved_time
+            watchdog.TRIG_DIR = saved_trig
+            watchdog.log = lambda *_a, **_k: None
+            shutil.rmtree(trig_root, ignore_errors=True)
+        check("the lease line survives 20 sweeps of a moving clock", 1, len(lines))
+        check("and it does not carry the elapsed seconds",
+              True, bool(lines) and "ttl, still held on:" in lines[0])
     finally:
         watchdog.JOBS_DIR, watchdog.log = saved, quiet
         shutil.rmtree(root, ignore_errors=True)
