@@ -132,6 +132,10 @@ def main():
         TTL = 180
         HELD = u"ok: input box not empty (\u5207\u597d\u4e86\uff0c\u8dd1 B \u7ec4), skipping"
         MOVED = "ok: no such error this turn"
+        # The draft cleared and the demoted ticket is on its first of two
+        # confirmations. Letting the lease lapse here threw away every held
+        # ticket one sweep before it could be sent.
+        CONFIRMING = "looks stuck (1/2 confirmations)"
 
         for name, age, verdict, alive, extended in [
             ("a fresh ticket is kept, and taken on faith", 10, "", True, False),
@@ -142,6 +146,12 @@ def main():
             ("the kept ticket is no longer taken on faith", TTL + 20, HELD, True, True),
             ("a held ticket is still let go eventually",
              TTL * 20 + 60, HELD, False, False),
+            ("a held ticket survives its own confirmation sweep",
+             TTL + 20, CONFIRMING, True, True),
+            ("and is still confirmed, not taken on faith",
+             TTL + 20, CONFIRMING, True, True),
+            ("a confirming ticket is still let go eventually",
+             TTL * 20 + 60, CONFIRMING, False, False),
         ]:
             trig_root = tempfile.mkdtemp(prefix="ccw-trig-")
             saved_trig, watchdog.TRIG_DIR = watchdog.TRIG_DIR, trig_root
