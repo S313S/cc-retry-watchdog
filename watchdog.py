@@ -478,7 +478,15 @@ _LEASE_NOTES = {}
 # Waiting longer is only safe because a session that recovers on its own voids
 # its ticket the moment a sweep sees it busy, and because a ticket kept past
 # the normal TTL is demoted below: it stops being taken on faith.
-HOLD_REASONS = ("input box not empty",)
+#
+# Demoted means it must be confirmed over two sweeps -- and the first of those
+# reports "looks stuck (1/2 confirmations)", which is no longer a hold reason.
+# So the lease ran out on exactly the sweep that was about to act: the draft
+# cleared, the screen read stuck once, and two seconds later the ticket was
+# "expired, discarded | after 1475s | last verdict: looks stuck (1/2
+# confirmations)". Every held ticket died that way; none could ever be sent.
+# A ticket waiting on its own confirmation is still held.
+HOLD_REASONS = ("input box not empty", "looks stuck (")
 HELD_TTL_MULT = 20               # 180s -> 1h before a held ticket is let go
 
 
