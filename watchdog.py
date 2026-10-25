@@ -185,7 +185,10 @@ CHROME_AFTER_ERR = [
     # is what silently killed the whole polling path (SENT[poll] stayed 0
     # while the hook did 160 rescues) and left one real session parked for 71
     # minutes on "Cogitated for 1h 5m 49s · done 19:14".
-    re.compile(r"^\s*\S{0,2}\s*[A-Za-z]+ for(?:\s+\d+[hms])+(?:\s*·.*)?$"),  # "* Brewed for 2m 45s"
+    # The verb is any word of letters, not ASCII only: the spinner vocabulary
+    # includes "Sautéed", and an [A-Za-z]+ verb read that line as real output,
+    # so a drop it finished under was judged "turn moved on" and never retried.
+    re.compile(r"^\s*\S{0,2}\s*[^\W\d_]+ for(?:\s+\d+[hms])+(?:\s*·.*)?$"),  # "* Brewed for 2m 45s"
     re.compile(r"^\s*Jump to bottom", re.I),
     re.compile(r"(?:ctrl\+v to paste|/clear to save|to edit in Vim|Auto-update failed|Run claude doctor)\s*$", re.I),
     re.compile(r"^\s*❯\s*$"),
@@ -609,12 +612,39 @@ def session_showing_job(job, sessions):
     Ambiguity is declined rather than guessed. Losing the ticket costs a few
     seconds -- the polling path sees the same drop on the same screen -- while
     a wrong match types into somebody else's session.
+
+    The project is read off the title's leading cwd basename when it is there.
+    It is not always: that segment is the *shell's* directory, so a tab that
+    attached to the job from ~ reads "xiaoci — ◐ <job name> — claude" and never
+    names the project. Then the claude process on the tab is asked instead --
+    its cwd is the job's, whatever directory the shell was left in.
     """
     base = os.path.basename(job["cwd"].rstrip("/")) if job["cwd"] else ""
+    want = os.path.realpath(job["cwd"]) if job["cwd"] else ""
     hits = [s for s in sessions
             if job["name"] in (s.get("title") or "")
-            and (not base or base in (s.get("title") or ""))]
+            and (not base or base in (s.get("title") or "")
+                 or want in claude_cwds(s.get("tty")))]
     return hits[0] if len(hits) == 1 else None
+
+
+def claude_cwds(tty):
+    """Working directories of the claude processes on a tty (realpath'd)."""
+    if not tty:
+        return set()
+    out, _err = run(["ps", "-t", tty.replace("/dev/", ""), "-o", "pid=,command="], timeout=5)
+    pids = []
+    for line in (out or "").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and os.path.basename(parts[1].split()[0]).lower() == "claude":
+            pids.append(parts[0])
+    cwds = set()
+    for pid in pids:
+        out, _err = run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], timeout=5)
+        for line in (out or "").splitlines():
+            if line.startswith("n"):
+                cwds.add(os.path.realpath(line[1:]))
+    return cwds
 
 
 def rehome_daemon_tickets(triggers, sessions):

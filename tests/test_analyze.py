@@ -46,6 +46,18 @@ case("parked: duration line carries the done-at time", True, u"""\
 {box}
 {status}""".format(box=BOX, status=STATUS))
 
+# The spinner verb is not always ASCII. An [A-Za-z]+ verb read this line as
+# real output, and a background job sat on the drop until someone typed.
+case("parked: duration verb with an accented letter", True, u"""\
+● API Error: Connection lost mid-response. The response above may be incomplete.
+
+✻ Sautéed for 28m 34s · done 11:25
+
+{box}
+❯
+{box}
+{status}""".format(box=BOX, status=STATUS))
+
 case("parked: duration line carries budget and hidden-message notes", True, u"""\
 ● API Error: Server error mid-response. The response above may be incomplete.
 

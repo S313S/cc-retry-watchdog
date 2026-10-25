@@ -58,6 +58,11 @@ def main():
     root = tempfile.mkdtemp(prefix="ccw-jobs-")
     saved, watchdog.JOBS_DIR = watchdog.JOBS_DIR, root
     quiet, watchdog.log = watchdog.log, lambda *_a, **_k: None
+    # No real ps/lsof: these ttys are made up, and on a live machine they are
+    # somebody's tabs. Each case says which claude cwd sits on which tty.
+    cwds_on = {}
+    saved_cwds = watchdog.claude_cwds
+    watchdog.claude_cwds = lambda tty: cwds_on.get(tty, set())
     try:
         os.makedirs(os.path.join(root, SID[:8]))
         with open(os.path.join(root, SID[:8], "state.json"), "w") as f:
@@ -92,6 +97,20 @@ def main():
               session_showing_job(job, [twin]))
         check("two tabs claim the same job -- decline rather than guess", None,
               session_showing_job(job, [TAB, dict(TAB, key="9:1", tty="/dev/ttys020")]))
+
+        # Attached from ~: the title's leading segment is the shell's directory,
+        # not the project. The claude process on the tab still runs in it.
+        home = dict(TAB, tty="/dev/ttys021",
+                    title=u"x — ◐ report formatting review — claude — 145×32")
+        check("attached from ~, nothing on the tab vouches for it", None,
+              session_showing_job(job, [home]))
+        cwds_on["/dev/ttys021"] = {os.path.realpath(JOB["cwd"])}
+        check("attached from ~, its claude runs in the job's cwd",
+              home["tty"], (session_showing_job(job, [OTHER, home]) or {}).get("tty"))
+        cwds_on["/dev/ttys002"] = {os.path.realpath("/Users/x/Work/Owli")}
+        check("same name, claude runs in another project", None,
+              session_showing_job(job, [twin]))
+        cwds_on.clear()
 
         # ------------------------------------------------ moving the ticket
         trig = {"/dev/ttys015": ticket()}
@@ -230,6 +249,7 @@ def main():
               True, bool(lines) and "ttl, still held on:" in lines[0])
     finally:
         watchdog.JOBS_DIR, watchdog.log = saved, quiet
+        watchdog.claude_cwds = saved_cwds
         shutil.rmtree(root, ignore_errors=True)
 
     ok = fail = 0
